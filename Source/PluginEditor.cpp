@@ -15,15 +15,13 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
 {
     // Make sure that before the constructor has finished, you've set the
     // editor's size to whatever you need it to be.
-    addAndMakeVisible (stutterButton);
-    stutterButton.setClickingTogglesState (true);
+    addAndMakeVisible(stutterButton);
+    stutterButton.setButtonText("Stutter");
 
-    stutterButton.onClick = [this]
-    {
-        if (auto* p = dynamic_cast<NanoStuttAudioProcessor*> (&processor))
-            p->setStutterOn (stutterButton.getToggleState());
-    };
-
+    stutterAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        static_cast<NanoStuttAudioProcessor&>(processor).parameters,
+        "stutterOn",
+        stutterButton);
     
     setSize (400, 300);
 }

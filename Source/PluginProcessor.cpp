@@ -11,18 +11,13 @@
 
 //==============================================================================
 NanoStuttAudioProcessor::NanoStuttAudioProcessor()
-#ifndef JucePlugin_PreferredChannelConfigurations
-     : AudioProcessor (BusesProperties()
-                     #if ! JucePlugin_IsMidiEffect
-                      #if ! JucePlugin_IsSynth
-                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                      #endif
-                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                     #endif
-                       )
-#endif
+    : AudioProcessor (BusesProperties()
+                      .withInput ("Input",  juce::AudioChannelSet::stereo(), true)
+                      .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      parameters(*this, nullptr, "PARAMETERS", createParameterLayout())
 {
 }
+
 
 NanoStuttAudioProcessor::~NanoStuttAudioProcessor()
 {
@@ -96,11 +91,11 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
     // ----- stutter: allocate ~4 s buffer -----
-    const int maxBufferSeconds = 4;
-    circularBuffer.setSize (getTotalNumOutputChannels(),
-                            (int) (maxBufferSeconds * sampleRate));
+    const double maxStutterSeconds = 3.0; // 1 beat at 20 BPM
+    circularBuffer.setSize(getTotalNumInputChannels(), (int)(sampleRate * maxStutterSeconds));
     circularBuffer.clear();
     writePos = 0;
+
 
 }
 
@@ -157,7 +152,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         buffer.clear (i, 0, numSamples);
 
     // === [A] Write live input to circular buffer ===
-    for (int ch = 0; ch < totalNumInputChannels; ++ch)
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
         auto* in  = buffer.getReadPointer  (ch);
         auto* cb  = circularBuffer.getWritePointer (ch);
@@ -168,49 +163,71 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     writePos = (writePos + numSamples) % circularBuffer.getNumSamples();
 
     // === [B] Handle stutter or pass-through ===
-    if (stutterOn)
+    if (*parameters.getRawParameterValue("stutterOn"))
     {
+        if (auto* playHead = getPlayHead())
+        {
+            if (auto position = playHead->getPosition())
+            {
+                auto bpm = position->getBpm().orFallback(120.0); // fallback if not provided
+                double beatsPerSecond = bpm / 60.0;
+                double secondsPer64th = 1.0 / (beatsPerSecond * 16.0);
+                stutterLenSamples = static_cast<int>(std::round(secondsPer64th * sampleRate));
+            }
+            else
+            {
+                stutterLenSamples = static_cast<int>(std::round(0.03 * sampleRate)); // fallback ~30ms
+            }
+        }
         // Latch a new slice if this is the first block of the stutter
         if (!stutterLatched)
         {
-            if (auto* playHead = getPlayHead())
+            maxStutterLenSamples = static_cast<int>(std::round(3.0 * sampleRate)); // 3 seconds fixed
+            stutterBuffer.setSize(buffer.getNumChannels(), maxStutterLenSamples);
+
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
             {
-                if (auto position = playHead->getPosition())
+                const float* cb = circularBuffer.getReadPointer(ch);
+                float* sb = stutterBuffer.getWritePointer(ch);
+
+                for (int i = 0; i < maxStutterLenSamples; ++i)
                 {
-                    auto bpm = position->getBpm().orFallback(120.0); // fallback if not provided
-                    double beatsPerSecond = bpm / 60.0;
-                    double secondsPer64th = 1.0 / (beatsPerSecond * 16.0);
-                    stutterLenSamples = static_cast<int>(std::round(secondsPer64th * sampleRate));
-                }
-                else
-                {
-                    stutterLenSamples = static_cast<int>(std::round(0.03 * sampleRate)); // fallback ~30ms
+                    int readIndex = (writePos - maxStutterLenSamples + i + circularBuffer.getNumSamples()) % circularBuffer.getNumSamples();
+                    sb[i] = cb[readIndex];
                 }
             }
 
-
-            stutterReadStart   = (writePos - stutterLenSamples + circularBuffer.getNumSamples())
-                                 % circularBuffer.getNumSamples();
             stutterPlayCounter = 0;
-            stutterLatched     = true;
+            stutterLatched = true;
         }
 
-        // Read from circular buffer and fill output
-        for (int ch = 0; ch < totalNumInputChannels; ++ch)
+        int currentLoopLen = maxStutterLenSamples; // fallback loop length
+
+        if (auto* playHead = getPlayHead())
         {
-            auto* out = buffer.getWritePointer(ch);
-            const auto* cb = circularBuffer.getReadPointer(ch);
-
-            for (int i = 0; i < numSamples; ++i)
+            if (auto position = playHead->getPosition())
             {
-                int readIndex = (stutterReadStart + stutterPlayCounter) % circularBuffer.getNumSamples();
-                out[i] = cb[readIndex];
-
-                ++stutterPlayCounter;
-                if (stutterPlayCounter >= stutterLenSamples)
-                    stutterPlayCounter = 0;
+                auto bpm = position->getBpm().orFallback(120.0);
+                double secondsPer64th = 60.0 / bpm / 16.0; // 1/64 note
+                currentLoopLen = std::clamp(static_cast<int>(std::round(secondsPer64th * sampleRate)), 1, maxStutterLenSamples);
             }
         }
+
+        // Read from stutterBuffer and fill output
+        for (int i = 0; i < numSamples; ++i)
+        {
+            int readIndex = stutterPlayCounter % currentLoopLen;
+
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            {
+                float* out = buffer.getWritePointer(ch);
+                const float* sb = stutterBuffer.getReadPointer(ch);
+                out[i] = sb[readIndex];
+            }
+
+            ++stutterPlayCounter;
+        }
+
     }
     else
     {
@@ -251,3 +268,13 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new NanoStuttAudioProcessor();
 }
+
+juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::createParameterLayout()
+{
+    std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
+
+    params.push_back (std::make_unique<juce::AudioParameterBool>("stutterOn", "Stutter On", false));
+
+    return { params.begin(), params.end() };
+}
+

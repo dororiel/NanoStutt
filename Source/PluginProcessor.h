@@ -58,8 +58,14 @@ public:
     
     // ==== Stutter variables ====
     juce::AudioBuffer<float>  circularBuffer;
-    int                       writePos            = 0;
+    juce::AudioBuffer<float> stutterBuffer;
+    juce::AudioProcessorValueTreeState parameters;
 
+    static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+
+    int                       writePos            = 0;
+    int                       maxStutterLenSamples = 0;
     bool                      stutterOn           = false;   // set from the GUI
     bool                      stutterLatched      = false;   // true while slice is repeating
     int                       stutterLenSamples   = 0;       // length of the 1/64-note in samples
