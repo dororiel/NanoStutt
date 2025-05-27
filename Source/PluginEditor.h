@@ -19,6 +19,7 @@ class NanoStuttAudioProcessorEditor  : public juce::AudioProcessorEditor
 public:
     NanoStuttAudioProcessorEditor (NanoStuttAudioProcessor&);
     ~NanoStuttAudioProcessorEditor() override;
+    juce::ToggleButton stutterButton { "Stutter" };
 
     //==============================================================================
     void paint (juce::Graphics&) override;

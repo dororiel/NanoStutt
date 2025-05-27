@@ -95,7 +95,22 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
 {
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
+    // ----- stutter: allocate ~4 s buffer -----
+    const int maxBufferSeconds = 4;
+    circularBuffer.setSize (getTotalNumOutputChannels(),
+                            (int) (maxBufferSeconds * sampleRate));
+    circularBuffer.clear();
+    writePos = 0;
+
 }
+
+void NanoStuttAudioProcessor::setStutterOn (bool shouldStutter)
+{
+    stutterOn = shouldStutter;
+    if (! stutterOn)
+        stutterLatched = false;          // let normal audio flow next block
+}
+
 
 void NanoStuttAudioProcessor::releaseResources()
 {
@@ -134,29 +149,76 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
+    auto numSamples             = buffer.getNumSamples();
+    auto sampleRate             = getSampleRate();
 
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
+    // Clear any output channels beyond the input range
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
+        buffer.clear (i, 0, numSamples);
 
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    // === [A] Write live input to circular buffer ===
+    for (int ch = 0; ch < totalNumInputChannels; ++ch)
     {
-        auto* channelData = buffer.getWritePointer (channel);
+        auto* in  = buffer.getReadPointer  (ch);
+        auto* cb  = circularBuffer.getWritePointer (ch);
 
-        // ..do something to the data...
+        for (int i = 0; i < numSamples; ++i)
+            cb[(writePos + i) % circularBuffer.getNumSamples()] = in[i];
+    }
+    writePos = (writePos + numSamples) % circularBuffer.getNumSamples();
+
+    // === [B] Handle stutter or pass-through ===
+    if (stutterOn)
+    {
+        // Latch a new slice if this is the first block of the stutter
+        if (!stutterLatched)
+        {
+            if (auto* playHead = getPlayHead())
+            {
+                if (auto position = playHead->getPosition())
+                {
+                    auto bpm = position->getBpm().orFallback(120.0); // fallback if not provided
+                    double beatsPerSecond = bpm / 60.0;
+                    double secondsPer64th = 1.0 / (beatsPerSecond * 16.0);
+                    stutterLenSamples = static_cast<int>(std::round(secondsPer64th * sampleRate));
+                }
+                else
+                {
+                    stutterLenSamples = static_cast<int>(std::round(0.03 * sampleRate)); // fallback ~30ms
+                }
+            }
+
+
+            stutterReadStart   = (writePos - stutterLenSamples + circularBuffer.getNumSamples())
+                                 % circularBuffer.getNumSamples();
+            stutterPlayCounter = 0;
+            stutterLatched     = true;
+        }
+
+        // Read from circular buffer and fill output
+        for (int ch = 0; ch < totalNumInputChannels; ++ch)
+        {
+            auto* out = buffer.getWritePointer(ch);
+            const auto* cb = circularBuffer.getReadPointer(ch);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                int readIndex = (stutterReadStart + stutterPlayCounter) % circularBuffer.getNumSamples();
+                out[i] = cb[readIndex];
+
+                ++stutterPlayCounter;
+                if (stutterPlayCounter >= stutterLenSamples)
+                    stutterPlayCounter = 0;
+            }
+        }
+    }
+    else
+    {
+        stutterLatched = false; // Reset for next time
+        // No need to copy — original buffer already contains the live audio
     }
 }
+
 
 //==============================================================================
 bool NanoStuttAudioProcessor::hasEditor() const

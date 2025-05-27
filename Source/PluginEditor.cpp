@@ -15,6 +15,16 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
 {
     // Make sure that before the constructor has finished, you've set the
     // editor's size to whatever you need it to be.
+    addAndMakeVisible (stutterButton);
+    stutterButton.setClickingTogglesState (true);
+
+    stutterButton.onClick = [this]
+    {
+        if (auto* p = dynamic_cast<NanoStuttAudioProcessor*> (&processor))
+            p->setStutterOn (stutterButton.getToggleState());
+    };
+
+    
     setSize (400, 300);
 }
 
@@ -35,6 +45,7 @@ void NanoStuttAudioProcessorEditor::paint (juce::Graphics& g)
 
 void NanoStuttAudioProcessorEditor::resized()
 {
+    stutterButton.setBounds (10, 10, 90, 30);
     // This is generally where you'll want to lay out the positions of any
     // subcomponents in your editor..
 }
