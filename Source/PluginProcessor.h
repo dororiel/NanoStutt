@@ -75,6 +75,9 @@ public:
     int                       currentLoopLen      = 0; // updated every block based on BPM
     int                       stutterWritePos     = 0; // Tracks where to record in the stutterBuffer
     int                       stutterSamplesWritten = 0; // total samples recorded into stutterBuffer
+    double                    lastQuantizedBeat   = -1.0;  // used to detect new quantized beat
+    bool                      autoStutterActive = false; // NEW: controls stutter playback without changing the GUI
+    int                       autoStutterRemainingSamples = 0;
 
     void setStutterOn (bool shouldStutter);   // called by the editor
 

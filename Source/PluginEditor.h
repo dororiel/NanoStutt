@@ -63,7 +63,16 @@ public:
     NanoStuttAudioProcessorEditor (NanoStuttAudioProcessor&);
     ~NanoStuttAudioProcessorEditor() override;
     juce::ToggleButton stutterButton;
+    juce::ToggleButton autoStutterToggle;
+    juce::Slider autoStutterChanceSlider;
+    juce::ComboBox autoStutterQuantMenu;
+    juce::Slider gateSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gateAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stutterAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoStutterToggleAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> autoStutterChanceAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> autoStutterQuantAttachment;
+
     StutterVisualizer visualizer;
 
     //==============================================================================

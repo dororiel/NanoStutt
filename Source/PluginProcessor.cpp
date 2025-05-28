@@ -149,31 +149,71 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     auto numSamples             = buffer.getNumSamples();
     auto sampleRate             = getSampleRate();
 
-    // Clear any output channels beyond the input range
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear(i, 0, numSamples);
 
-    const bool isStuttering = *parameters.getRawParameterValue("stutterOn");
+    auto& params = parameters;
+    // === Auto-stutter triggering ===
+    bool autoStutter  = parameters.getRawParameterValue("autoStutterEnabled")->load();
+    float chance      = parameters.getRawParameterValue("autoStutterChance")->load();
+    int quantIndex    = (int) parameters.getRawParameterValue("autoStutterQuant")->load();
+
+    if (!(*params.getRawParameterValue("stutterOn")) && autoStutter)
+    {
+        if (auto* playHead = getPlayHead())
+        {
+            if (auto position = playHead->getPosition())
+            {
+                auto ppq = position->getPpqPosition();
+                if (ppq.hasValue())
+                {
+                    double quantUnit = 1.0 / std::pow(2.0, quantIndex);
+                    double quantPos = std::fmod(*ppq, quantUnit);
+
+                    if (quantPos < (1.0 / 960.0) && juce::Random::getSystemRandom().nextFloat() < chance)
+                    {
+                        double bpm = position->getBpm().orFallback(120.0);
+                        float gateScale = parameters.getRawParameterValue("autoStutterGate")->load();
+                        double quantDurationSeconds = 60.0 / bpm * quantUnit;
+                        double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
+                        autoStutterRemainingSamples = static_cast<int>(sampleRate * gateDurationSeconds);
+                        autoStutterActive = true;
+                        stutterLatched = false;
+                    }
+                }
+            }
+        }
+    }
+
+    const bool guiStutter = *params.getRawParameterValue("stutterOn");
+
+    bool isStuttering = guiStutter || autoStutterActive;
+
+    if (!guiStutter && autoStutterActive && autoStutterRemainingSamples <= 0)
+    {
+        autoStutterActive = false;
+        stutterLatched = false;
+        isStuttering = false;
+    }
+
 
     if (isStuttering)
     {
         if (!stutterLatched)
         {
-            // Prepare stutterBuffer to record from this moment on
             stutterSamplesWritten = 0;
-            maxStutterLenSamples = static_cast<int>(std::round(3.0 * sampleRate));
+            stutterPlayCounter = 0;
+            stutterWritePos = 0;
+            maxStutterLenSamples = static_cast<int>(3.0 * sampleRate);
             stutterBuffer.setSize(buffer.getNumChannels(), maxStutterLenSamples);
             stutterBuffer.clear();
-            stutterWritePos = 0;
-            stutterPlayCounter = 0;
             stutterLatched = true;
         }
 
-        // === [A] Write incoming audio into stutterBuffer ===
         for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
         {
-            auto* in  = buffer.getReadPointer(ch);
-            auto* sb  = stutterBuffer.getWritePointer(ch);
+            auto* in = buffer.getReadPointer(ch);
+            auto* sb = stutterBuffer.getWritePointer(ch);
 
             for (int i = 0; i < numSamples && stutterSamplesWritten < maxStutterLenSamples; ++i)
             {
@@ -189,36 +229,35 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             stutterWritePos = (stutterWritePos + writableSamples) % maxStutterLenSamples;
         }
 
-        // === [B] Determine loop length based on BPM ===
-        int currentLoopLen = static_cast<int>(std::round(0.03 * sampleRate)); // fallback
+        int loopLen = static_cast<int>(0.03 * sampleRate); // fallback
         if (auto* playHead = getPlayHead())
         {
             if (auto position = playHead->getPosition())
             {
-                double bpm = position->getBpm().orFallback(120.0);
+                auto bpm = position->getBpm().orFallback(120.0);
                 double secondsPer64th = 60.0 / bpm / 16.0;
-                currentLoopLen = std::clamp(static_cast<int>(std::round(secondsPer64th * sampleRate)), 1, stutterSamplesWritten);
+                loopLen = std::clamp(static_cast<int>(secondsPer64th * sampleRate), 1, stutterSamplesWritten);
             }
         }
 
-        // === [C] Play from beginning of stutterBuffer ===
         for (int i = 0; i < numSamples; ++i)
         {
-            int readIndex = stutterPlayCounter % currentLoopLen;
-
+            int readIndex = stutterPlayCounter % loopLen;
             for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
             {
                 const float* sb = stutterBuffer.getReadPointer(ch);
                 buffer.getWritePointer(ch)[i] = sb[readIndex];
             }
-
             ++stutterPlayCounter;
         }
+        if (autoStutterActive && !guiStutter)
+            autoStutterRemainingSamples -= numSamples;
     }
     else
     {
         stutterLatched = false;
     }
+
 }
 
 
@@ -257,8 +296,15 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
-
+    params.push_back (std::make_unique<juce::AudioParameterFloat>(
+        "autoStutterGate", "Auto Stutter Gate",
+        juce::NormalisableRange<float>(0.25f, 1.0f, 0.001f), 0.25f));
     params.push_back (std::make_unique<juce::AudioParameterBool>("stutterOn", "Stutter On", false));
+    params.push_back (std::make_unique<juce::AudioParameterBool>("autoStutterEnabled", "Auto Stutter Enabled", false));
+    params.push_back (std::make_unique<juce::AudioParameterFloat>("autoStutterChance", "Auto Stutter Chance", 0.0f, 1.0f, 0.1f));
+    params.push_back (std::make_unique<juce::AudioParameterChoice>(
+        "autoStutterQuant", "Auto Stutter Quantization",
+        juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 2));
 
     return { params.begin(), params.end() };
 }
