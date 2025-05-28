@@ -11,20 +11,21 @@
 
 //==============================================================================
 NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProcessor& p)
-    : AudioProcessorEditor (&p), audioProcessor (p)
+: AudioProcessorEditor (&p), visualizer(p), audioProcessor (p)
 {
-    // Make sure that before the constructor has finished, you've set the
-    // editor's size to whatever you need it to be.
     addAndMakeVisible(stutterButton);
     stutterButton.setButtonText("Stutter");
 
     stutterAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        static_cast<NanoStuttAudioProcessor&>(processor).parameters,
+        audioProcessor.parameters,
         "stutterOn",
         stutterButton);
-    
+
+    addAndMakeVisible(visualizer);
+
     setSize (400, 300);
 }
+
 
 NanoStuttAudioProcessorEditor::~NanoStuttAudioProcessorEditor()
 {
@@ -43,7 +44,8 @@ void NanoStuttAudioProcessorEditor::paint (juce::Graphics& g)
 
 void NanoStuttAudioProcessorEditor::resized()
 {
-    stutterButton.setBounds (10, 10, 90, 30);
+    stutterButton.setBounds(10, 10, 90, 30);
+    visualizer.setBounds(10, 50, getWidth() - 20, getHeight() - 60);
     // This is generally where you'll want to lay out the positions of any
     // subcomponents in your editor..
 }

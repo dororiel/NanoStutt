@@ -71,6 +71,10 @@ public:
     int                       stutterLenSamples   = 0;       // length of the 1/64-note in samples
     int                       stutterReadStart    = 0;       // start index inside circularBuffer
     int                       stutterPlayCounter  = 0;       // wraps 0…stutterLenSamples-1
+    int                       stutterWaitSamples  = 0;
+    int                       currentLoopLen      = 0; // updated every block based on BPM
+    int                       stutterWritePos     = 0; // Tracks where to record in the stutterBuffer
+    int                       stutterSamplesWritten = 0; // total samples recorded into stutterBuffer
 
     void setStutterOn (bool shouldStutter);   // called by the editor
 

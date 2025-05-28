@@ -91,10 +91,12 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
     // ----- stutter: allocate ~4 s buffer -----
-    const double maxStutterSeconds = 3.0; // 1 beat at 20 BPM
-    circularBuffer.setSize(getTotalNumInputChannels(), (int)(sampleRate * maxStutterSeconds));
+    const double maxStutterSeconds = 3.0;
+    circularBuffer.setSize(getTotalNumInputChannels(), static_cast<int>(sampleRate * maxStutterSeconds));
     circularBuffer.clear();
     writePos = 0;
+
+    maxStutterLenSamples = static_cast<int>(sampleRate * maxStutterSeconds);
 
 
 }
@@ -139,7 +141,7 @@ bool NanoStuttAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts
 }
 #endif
 
-void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
@@ -149,90 +151,73 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
     // Clear any output channels beyond the input range
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, numSamples);
+        buffer.clear(i, 0, numSamples);
 
-    // === [A] Write live input to circular buffer ===
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    const bool isStuttering = *parameters.getRawParameterValue("stutterOn");
+
+    if (isStuttering)
     {
-        auto* in  = buffer.getReadPointer  (ch);
-        auto* cb  = circularBuffer.getWritePointer (ch);
-
-        for (int i = 0; i < numSamples; ++i)
-            cb[(writePos + i) % circularBuffer.getNumSamples()] = in[i];
-    }
-    writePos = (writePos + numSamples) % circularBuffer.getNumSamples();
-
-    // === [B] Handle stutter or pass-through ===
-    if (*parameters.getRawParameterValue("stutterOn"))
-    {
-        if (auto* playHead = getPlayHead())
-        {
-            if (auto position = playHead->getPosition())
-            {
-                auto bpm = position->getBpm().orFallback(120.0); // fallback if not provided
-                double beatsPerSecond = bpm / 60.0;
-                double secondsPer64th = 1.0 / (beatsPerSecond * 16.0);
-                stutterLenSamples = static_cast<int>(std::round(secondsPer64th * sampleRate));
-            }
-            else
-            {
-                stutterLenSamples = static_cast<int>(std::round(0.03 * sampleRate)); // fallback ~30ms
-            }
-        }
-        // Latch a new slice if this is the first block of the stutter
         if (!stutterLatched)
         {
-            maxStutterLenSamples = static_cast<int>(std::round(3.0 * sampleRate)); // 3 seconds fixed
+            // Prepare stutterBuffer to record from this moment on
+            stutterSamplesWritten = 0;
+            maxStutterLenSamples = static_cast<int>(std::round(3.0 * sampleRate));
             stutterBuffer.setSize(buffer.getNumChannels(), maxStutterLenSamples);
-
-            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-            {
-                const float* cb = circularBuffer.getReadPointer(ch);
-                float* sb = stutterBuffer.getWritePointer(ch);
-
-                for (int i = 0; i < maxStutterLenSamples; ++i)
-                {
-                    int readIndex = (writePos - maxStutterLenSamples + i + circularBuffer.getNumSamples()) % circularBuffer.getNumSamples();
-                    sb[i] = cb[readIndex];
-                }
-            }
-
+            stutterBuffer.clear();
+            stutterWritePos = 0;
             stutterPlayCounter = 0;
             stutterLatched = true;
         }
 
-        int currentLoopLen = maxStutterLenSamples; // fallback loop length
+        // === [A] Write incoming audio into stutterBuffer ===
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            auto* in  = buffer.getReadPointer(ch);
+            auto* sb  = stutterBuffer.getWritePointer(ch);
 
+            for (int i = 0; i < numSamples && stutterSamplesWritten < maxStutterLenSamples; ++i)
+            {
+                int writeIndex = (stutterWritePos + i) % maxStutterLenSamples;
+                sb[writeIndex] = in[i];
+                ++stutterSamplesWritten;
+            }
+        }
+
+        if (stutterSamplesWritten < maxStutterLenSamples)
+        {
+            int writableSamples = std::min(numSamples, maxStutterLenSamples - stutterSamplesWritten);
+            stutterWritePos = (stutterWritePos + writableSamples) % maxStutterLenSamples;
+        }
+
+        // === [B] Determine loop length based on BPM ===
+        int currentLoopLen = static_cast<int>(std::round(0.03 * sampleRate)); // fallback
         if (auto* playHead = getPlayHead())
         {
             if (auto position = playHead->getPosition())
             {
-                auto bpm = position->getBpm().orFallback(120.0);
-                double secondsPer64th = 60.0 / bpm / 16.0; // 1/64 note
-                currentLoopLen = std::clamp(static_cast<int>(std::round(secondsPer64th * sampleRate)), 1, maxStutterLenSamples);
+                double bpm = position->getBpm().orFallback(120.0);
+                double secondsPer64th = 60.0 / bpm / 16.0;
+                currentLoopLen = std::clamp(static_cast<int>(std::round(secondsPer64th * sampleRate)), 1, stutterSamplesWritten);
             }
         }
 
-        // Read from stutterBuffer and fill output
+        // === [C] Play from beginning of stutterBuffer ===
         for (int i = 0; i < numSamples; ++i)
         {
             int readIndex = stutterPlayCounter % currentLoopLen;
 
             for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
             {
-                float* out = buffer.getWritePointer(ch);
                 const float* sb = stutterBuffer.getReadPointer(ch);
-                out[i] = sb[readIndex];
+                buffer.getWritePointer(ch)[i] = sb[readIndex];
             }
 
             ++stutterPlayCounter;
         }
-
     }
     else
     {
-        stutterLatched = false; // Reset for next time
-        // No need to copy — original buffer already contains the live audio
+        stutterLatched = false;
     }
 }
 
