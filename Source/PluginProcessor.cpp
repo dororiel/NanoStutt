@@ -167,19 +167,26 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 auto ppq = position->getPpqPosition();
                 if (ppq.hasValue())
                 {
+                    double bpm = position->getBpm().orFallback(120.0);
                     double quantUnit = 1.0 / std::pow(2.0, quantIndex);
-                    double quantPos = std::fmod(*ppq, quantUnit);
+                    double quantizedBeat = std::floor(*ppq / quantUnit);
 
-                    if (quantPos < (1.0 / 960.0) && juce::Random::getSystemRandom().nextFloat() < chance)
+                    if (quantizedBeat != lastQuantizedBeat)
                     {
-                        double bpm = position->getBpm().orFallback(120.0);
-                        float gateScale = parameters.getRawParameterValue("autoStutterGate")->load();
-                        double quantDurationSeconds = 60.0 / bpm * quantUnit;
-                        double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
-                        autoStutterRemainingSamples = static_cast<int>(sampleRate * gateDurationSeconds);
-                        autoStutterActive = true;
-                        stutterLatched = false;
+                        lastQuantizedBeat = quantizedBeat;
+
+                        if (juce::Random::getSystemRandom().nextFloat() < chance)
+                        {
+                            float gateScale = parameters.getRawParameterValue("autoStutterGate")->load();
+                            double quantDurationSeconds = 60.0 / bpm * quantUnit;
+                            double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
+
+                            autoStutterRemainingSamples = static_cast<int>(sampleRate * gateDurationSeconds);
+                            autoStutterActive = true;
+                            stutterLatched = false;
+                        }
                     }
+
                 }
             }
         }
