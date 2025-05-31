@@ -174,7 +174,37 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     if (quantizedBeat != lastQuantizedBeat)
                     {
                         lastQuantizedBeat = quantizedBeat;
+                        secondsPerWholeNote = 240.0 / bpm; // 4 beats per whole note
+                        std::vector<std::pair<double, int>> rates = {
+                            { parameters.getRawParameterValue("rateProb_1/4")->load(), 4 },
+                            { parameters.getRawParameterValue("rateProb_1/3")->load(), 3 },
+                            { parameters.getRawParameterValue("rateProb_1/6")->load(), 6 },
+                            { parameters.getRawParameterValue("rateProb_1/8")->load(), 8 },
+                            { parameters.getRawParameterValue("rateProb_1/12")->load(), 12 },
+                            { parameters.getRawParameterValue("rateProb_1/16")->load(), 16 },
+                            { parameters.getRawParameterValue("rateProb_1/24")->load(), 24 },
+                            { parameters.getRawParameterValue("rateProb_1/32")->load(), 32 }
+                        };
 
+                        double totalWeight = 0.0;
+                        for (const auto& [weight, _] : rates)
+                            totalWeight += weight;
+
+                        chosenDenominator = 16; // default fallback
+                        if (totalWeight > 0.0)
+                        {
+                            double r = juce::Random::getSystemRandom().nextDouble() * totalWeight;
+                            double accum = 0.0;
+                            for (const auto& [weight, denom] : rates)
+                            {
+                                accum += weight;
+                                if (r <= accum)
+                                {
+                                    chosenDenominator = denom;
+                                    break;
+                                }
+                            }
+                        }
                         if (juce::Random::getSystemRandom().nextFloat() < chance)
                         {
                             float gateScale = parameters.getRawParameterValue("autoStutterGate")->load();
@@ -191,10 +221,26 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             }
         }
     }
+    
+    // Handle manual stutter rate selection
+    if (manualStutterTriggered && manualStutterRateDenominator > 0)
+    {
+        chosenDenominator = manualStutterRateDenominator;
+        double bpm = 120.0;
+        if (auto* playHead = getPlayHead())
+        {
+            if (auto position = playHead->getPosition())
+                bpm = position->getBpm().orFallback(120.0);
+        }
+
+        secondsPerWholeNote = 240.0 / bpm;
+        autoStutterRemainingSamples = static_cast<int>((secondsPerWholeNote / chosenDenominator) * getSampleRate());
+        autoStutterActive = false;
+    }
 
     const bool guiStutter = *params.getRawParameterValue("stutterOn");
 
-    bool isStuttering = guiStutter || autoStutterActive;
+    bool isStuttering = guiStutter || autoStutterActive || manualStutterTriggered ;
 
     if (!guiStutter && autoStutterActive && autoStutterRemainingSamples <= 0)
     {
@@ -241,9 +287,9 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         {
             if (auto position = playHead->getPosition())
             {
-                auto bpm = position->getBpm().orFallback(120.0);
-                double secondsPer64th = 60.0 / bpm / 16.0;
-                loopLen = std::clamp(static_cast<int>(secondsPer64th * sampleRate), 1, stutterSamplesWritten);
+                chosenDenominator = manualStutterRateDenominator > 0 ? manualStutterRateDenominator : chosenDenominator;
+                double secondsPerSlice = secondsPerWholeNote / chosenDenominator;
+                loopLen = std::clamp(static_cast<int>(secondsPerSlice * sampleRate), 1, stutterSamplesWritten);
             }
         }
 
@@ -312,6 +358,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back (std::make_unique<juce::AudioParameterChoice>(
         "autoStutterQuant", "Auto Stutter Quantization",
         juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 2));
+    auto rateLabels = juce::StringArray { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    for (int i = 0; i < rateLabels.size(); ++i)
+    {
+        juce::String id = "rateProb_" + rateLabels[i];
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.0f, 1.0f, 0.0f));
+    }
+
 
     return { params.begin(), params.end() };
 }

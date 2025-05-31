@@ -78,6 +78,13 @@ public:
     double                    lastQuantizedBeat   = -1.0;  // used to detect new quantized beat
     bool                      autoStutterActive = false; // NEW: controls stutter playback without changing the GUI
     int                       autoStutterRemainingSamples = 0;
+    double                    chosenDenominator = 64;
+    double                    secondsPerWholeNote = 4;
+    int                       manualStutterRateDenominator = -1;
+    bool                      manualStutterTriggered = false;
+
+    void setManualStutterRate(int rate) { manualStutterRateDenominator = rate; }
+
 
     void setStutterOn (bool shouldStutter);   // called by the editor
 

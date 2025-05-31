@@ -72,6 +72,13 @@ public:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoStutterToggleAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> autoStutterChanceAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> autoStutterQuantAttachment;
+    juce::OwnedArray<juce::Slider> rateProbSliders;
+    juce::OwnedArray<juce::Label> rateProbLabels;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> rateProbAttachments;
+    juce::Label chanceLabel;
+    juce::Label quantLabel;
+    juce::Label gateLabel;
+
 
     StutterVisualizer visualizer;
 
@@ -80,6 +87,8 @@ public:
     void resized() override;
 
 private:
+    std::vector<std::unique_ptr<juce::TextButton>> manualStutterButtons;
+    std::vector<int> manualStutterRates { 4, 3, 6, 8, 12, 16, 24, 32 }; // Denominators
     // This reference is provided as a quick way for your editor to
     // access the processor object that created it.
     NanoStuttAudioProcessor& audioProcessor;
