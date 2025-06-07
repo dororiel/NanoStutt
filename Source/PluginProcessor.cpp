@@ -351,13 +351,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
     params.push_back (std::make_unique<juce::AudioParameterFloat>(
         "autoStutterGate", "Auto Stutter Gate",
-        juce::NormalisableRange<float>(0.25f, 1.0f, 0.001f), 0.25f));
+        0.25f, 1.0f, 0.75));
     params.push_back (std::make_unique<juce::AudioParameterBool>("stutterOn", "Stutter On", false));
     params.push_back (std::make_unique<juce::AudioParameterBool>("autoStutterEnabled", "Auto Stutter Enabled", false));
-    params.push_back (std::make_unique<juce::AudioParameterFloat>("autoStutterChance", "Auto Stutter Chance", 0.0f, 1.0f, 0.1f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat>("autoStutterChance", "Auto Stutter Chance", 0.0f, 1.0f, 0.6f));
     params.push_back (std::make_unique<juce::AudioParameterChoice>(
         "autoStutterQuant", "Auto Stutter Quantization",
-        juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 2));
+        juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 1));
     auto rateLabels = juce::StringArray { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
     for (int i = 0; i < rateLabels.size(); ++i)
     {
