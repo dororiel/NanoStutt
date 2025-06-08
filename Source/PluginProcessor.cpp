@@ -92,21 +92,11 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     // initialisation that you need..
     // ----- stutter: allocate ~4 s buffer -----
     const double maxStutterSeconds = 3.0;
-    circularBuffer.setSize(getTotalNumInputChannels(), static_cast<int>(sampleRate * maxStutterSeconds));
-    circularBuffer.clear();
     writePos = 0;
-
     maxStutterLenSamples = static_cast<int>(sampleRate * maxStutterSeconds);
 
-
 }
 
-void NanoStuttAudioProcessor::setStutterOn (bool shouldStutter)
-{
-    stutterOn = shouldStutter;
-    if (! stutterOn)
-        stutterLatched = false;          // let normal audio flow next block
-}
 
 
 void NanoStuttAudioProcessor::releaseResources()

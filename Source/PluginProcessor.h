@@ -57,7 +57,6 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
     
     // ==== Stutter variables ====
-    juce::AudioBuffer<float>  circularBuffer;
     juce::AudioBuffer<float> stutterBuffer;
     juce::AudioProcessorValueTreeState parameters;
 
@@ -66,13 +65,9 @@ public:
 
     int                       writePos            = 0;
     int                       maxStutterLenSamples = 0;
-    bool                      stutterOn           = false;   // set from the GUI
     bool                      stutterLatched      = false;   // true while slice is repeating
     int                       stutterLenSamples   = 0;       // length of the 1/64-note in samples
-    int                       stutterReadStart    = 0;       // start index inside circularBuffer
     int                       stutterPlayCounter  = 0;       // wraps 0…stutterLenSamples-1
-    int                       stutterWaitSamples  = 0;
-    int                       currentLoopLen      = 0; // updated every block based on BPM
     int                       stutterWritePos     = 0; // Tracks where to record in the stutterBuffer
     int                       stutterSamplesWritten = 0; // total samples recorded into stutterBuffer
     double                    lastQuantizedBeat   = -1.0;  // used to detect new quantized beat
@@ -85,8 +80,6 @@ public:
 
     void setManualStutterRate(int rate) { manualStutterRateDenominator = rate; }
 
-
-    void setStutterOn (bool shouldStutter);   // called by the editor
 
 
 private:
