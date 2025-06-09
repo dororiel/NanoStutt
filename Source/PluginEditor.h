@@ -78,6 +78,23 @@ public:
     juce::Label chanceLabel;
     juce::Label quantLabel;
     juce::Label gateLabel;
+    juce::Slider nanoBlendSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoBlendAttachment;
+
+    juce::OwnedArray<juce::Slider> nanoRateProbSliders;
+    juce::OwnedArray<juce::TextEditor> nanoRatioEditors;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> nanoRatioAttachments;
+
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> nanoRateProbAttachments;
+   
+    juce::Label nanoBlendLabel;
+    
+    juce::Slider nanoTuneSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoTuneAttachment;
+   
+    juce::Label nanoTuneLabel;
+
+
 
 
     StutterVisualizer visualizer;

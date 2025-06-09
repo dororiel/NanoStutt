@@ -121,6 +121,66 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         addAndMakeVisible(*button);
         manualStutterButtons.push_back(std::move(button));
     }
+    // === Repeat/Nano Blend Slider ===
+    addAndMakeVisible(nanoBlendSlider);
+    nanoBlendSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    nanoBlendSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    nanoBlendAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.parameters, "nanoBlend", nanoBlendSlider);
+    
+    nanoBlendLabel.setText("Repeat/Nano", juce::dontSendNotification);
+    nanoBlendLabel.attachToComponent(&nanoBlendSlider, false);
+    addAndMakeVisible(nanoBlendLabel);
+    
+    // === Nano Tune Slider ===
+    addAndMakeVisible(nanoTuneSlider);
+    nanoTuneSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    nanoTuneSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    nanoTuneAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.parameters, "nanoTune", nanoTuneSlider);
+
+    // === Editable Nano Ratio Text Boxes ===
+    for (int i = 0; i < 12; ++i)
+    {
+        auto* editor = new juce::TextEditor();
+        editor->setInputRestrictions(0, "0123456789."); // allow only digits and decimal
+        editor->setJustification(juce::Justification::centred);
+        
+        // Set initial value
+        float ratioVal = audioProcessor.parameters.getRawParameterValue("nanoRatio_" + juce::String(i))->load();
+        editor->setText(juce::String(ratioVal, 3), juce::dontSendNotification);
+
+        // Commit on Enter or focus lost
+        editor->onReturnKey = editor->onFocusLost = [this, i, editor]() {
+            double val = editor->getText().getDoubleValue();
+            val = juce::jlimit(0.1, 2.0, val);
+            auto* param = audioProcessor.parameters.getParameter("nanoRatio_" + juce::String(i));
+            if (param != nullptr)
+                param->setValueNotifyingHost(static_cast<float>((val - 0.1) / (2.0 - 0.1))); // normalized
+        };
+
+        addAndMakeVisible(editor);
+        nanoRatioEditors.add(editor);
+    }
+
+
+
+
+    // === Nano Rate Sliders ===
+    for (int i = 0; i < 12; ++i)
+    {
+        auto* slider = new juce::Slider();
+        slider->setSliderStyle(juce::Slider::LinearVertical);
+        slider->setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        addAndMakeVisible(slider);
+        nanoRateProbSliders.add(slider);
+
+        juce::String paramId = "nanoProb_" + juce::String(i);
+        nanoRateProbAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            audioProcessor.parameters, paramId, *slider));
+    }
+
+
 
 
 
@@ -170,6 +230,24 @@ void NanoStuttAudioProcessorEditor::resized()
         rateProbSliders[i]->setBounds(startX + i * (sliderWidth + spacing), sliderY, sliderWidth, sliderHeight);
         manualStutterButtons[i]->setBounds(startX + i * (sliderWidth + spacing), buttonY, sliderWidth, buttonHeight);
     }
+    
+    // === Nano Rate Sliders (below main set) ===
+    int nanoSliderY = buttonY + buttonHeight + spacing + 10;
+    for (int i = 0; i < nanoRateProbSliders.size(); ++i)
+    {
+        nanoRateProbSliders[i]->setBounds(startX + i * (sliderWidth + spacing), nanoSliderY, sliderWidth, sliderHeight);
+    }
+    int textEditorY = nanoSliderY - 25; // above the sliders
+
+    for (int i = 0; i < nanoRatioEditors.size(); ++i)
+    {
+        nanoRatioEditors[i]->setBounds(startX + i * (sliderWidth + spacing), textEditorY, sliderWidth, 20);
+    }
+
+
+    // === Nano Blend Slider (left side) ===
+    nanoBlendSlider.setBounds(margin, nanoSliderY + sliderHeight + 10, 150, 20);
+
 
     // === Gate Knob (Left) ===
     const int gateKnobSize = 60;
@@ -199,6 +277,11 @@ void NanoStuttAudioProcessorEditor::resized()
     controlY += 40;
 
     stutterButton.setBounds(controlPanelX, controlY, 110, 24);
+    
+    // === Tune Knob ===
+    nanoTuneSlider.setBounds(margin, nanoBlendSlider.getBottom() + 10, 150, 20);
+    
+
 
     // === Visualizer (Bottom) ===
     int visHeight = 70;

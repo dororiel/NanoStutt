@@ -16,6 +16,8 @@ NanoStuttAudioProcessor::NanoStuttAudioProcessor()
                       .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       parameters(*this, nullptr, "PARAMETERS", createParameterLayout())
 {
+    initializeParameterListeners();
+
 }
 
 
@@ -165,36 +167,52 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     {
                         lastQuantizedBeat = quantizedBeat;
                         secondsPerWholeNote = 240.0 / bpm; // 4 beats per whole note
-                        std::vector<std::pair<double, int>> rates = {
-                            { parameters.getRawParameterValue("rateProb_1/4")->load(), 4 },
-                            { parameters.getRawParameterValue("rateProb_1/3")->load(), 3 },
-                            { parameters.getRawParameterValue("rateProb_1/6")->load(), 6 },
-                            { parameters.getRawParameterValue("rateProb_1/8")->load(), 8 },
-                            { parameters.getRawParameterValue("rateProb_1/12")->load(), 12 },
-                            { parameters.getRawParameterValue("rateProb_1/16")->load(), 16 },
-                            { parameters.getRawParameterValue("rateProb_1/24")->load(), 24 },
-                            { parameters.getRawParameterValue("rateProb_1/32")->load(), 32 }
-                        };
+                        bool useNano = juce::Random::getSystemRandom().nextFloat() < nanoBlend;
 
-                        double totalWeight = 0.0;
-                        for (const auto& [weight, _] : rates)
-                            totalWeight += weight;
+                        // Always use a 12-element array for compatibility
+                        const std::array<float, 12>* weightsPtr = nullptr;
 
-                        chosenDenominator = 16; // default fallback
-                        if (totalWeight > 0.0)
+                        if (useNano)
                         {
-                            double r = juce::Random::getSystemRandom().nextDouble() * totalWeight;
-                            double accum = 0.0;
-                            for (const auto& [weight, denom] : rates)
+                            weightsPtr = &nanoRateWeights;
+                        }
+                        else
+                        {
+                            static std::array<float, 12> paddedRegularWeights {};
+                            std::copy(regularRateWeights.begin(), regularRateWeights.end(), paddedRegularWeights.begin());
+                            weightsPtr = &paddedRegularWeights;
+                        }
+
+                        const auto& weights = *weightsPtr;
+
+                        // Random weighted selection
+                        float total = std::accumulate(weights.begin(), weights.end(), 0.0f);
+                        float r = juce::Random::getSystemRandom().nextFloat() * total;
+
+                        float accum = 0.0f;
+                        int selectedIndex = 0;
+                        for (int i = 0; i < static_cast<int>(weights.size()); ++i)
+                        {
+                            accum += weights[i];
+                            if (r <= accum)
                             {
-                                accum += weight;
-                                if (r <= accum)
-                                {
-                                    chosenDenominator = denom;
-                                    break;
-                                }
+                                selectedIndex = i;
+                                break;
                             }
                         }
+
+                        double bpm = position->getBpm().orFallback(120.0);
+                        float currentNanoTune = parameters.getRawParameterValue("nanoTune")->load();
+                        double nanoBase = ((60.0 / bpm) / 16.0) / currentNanoTune;
+                        double sliceDuration = useNano
+                            ? nanoBase / parameters.getRawParameterValue("nanoRatio_" + std::to_string(selectedIndex))->load()
+                            : (240.0 / bpm) / regularDenominators[selectedIndex];
+
+                        chosenDenominator = useNano
+                            ? 240.0 / (bpm * sliceDuration)
+                            : regularDenominators[selectedIndex];
+
+                        
                         if (juce::Random::getSystemRandom().nextFloat() < chance)
                         {
                             float gateScale = parameters.getRawParameterValue("autoStutterGate")->load();
@@ -339,23 +357,88 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
-    params.push_back (std::make_unique<juce::AudioParameterFloat>(
-        "autoStutterGate", "Auto Stutter Gate",
-        0.25f, 1.0f, 0.75));
-    params.push_back (std::make_unique<juce::AudioParameterBool>("stutterOn", "Stutter On", false));
-    params.push_back (std::make_unique<juce::AudioParameterBool>("autoStutterEnabled", "Auto Stutter Enabled", false));
-    params.push_back (std::make_unique<juce::AudioParameterFloat>("autoStutterChance", "Auto Stutter Chance", 0.0f, 1.0f, 0.6f));
-    params.push_back (std::make_unique<juce::AudioParameterChoice>(
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "autoStutterGate", "Auto Stutter Gate", 0.25f, 1.0f, 0.75f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("stutterOn", "Stutter On", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("autoStutterEnabled", "Auto Stutter Enabled", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("autoStutterChance", "Auto Stutter Chance", 0.0f, 1.0f, 0.6f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
         "autoStutterQuant", "Auto Stutter Quantization",
         juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 1));
+
+    // Traditional stutter rate probabilities
     auto rateLabels = juce::StringArray { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
-    for (int i = 0; i < rateLabels.size(); ++i)
+    for (const auto& label : rateLabels)
     {
-        juce::String id = "rateProb_" + rateLabels[i];
+        juce::String id = "rateProb_" + label;
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.0f, 1.0f, 0.0f));
+    }
+
+    // Nano stutter rate probabilities
+    for (int i = 0; i < 12; ++i)
+    {
+        juce::String id = "nanoProb_" + juce::String(i);
         params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.0f, 1.0f, 0.0f));
     }
 
 
+    // Blend between traditional and nano set
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("nanoBlend", "Repeat/Nano", 0.0f, 1.0f, 0.0f));
+
+    // Nano tune and editable ratios
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("nanoTune", "Nano Tune", 0.75f, 2.0f, 1.0f));
+
+    for (int i = 0; i < 12; ++i)
+    {
+        juce::String id = "nanoRatio_" + juce::String(i);
+        float defaultRatio = std::pow(2.0f, static_cast<float>(i) / 12.0f);
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.1f, 2.0f, defaultRatio));
+    }
+
+    // ✅ RETURN AT THE END
     return { params.begin(), params.end() };
 }
+
+
+void NanoStuttAudioProcessor::updateCachedParameters()
+{
+    static const std::array<std::string, 8> regularLabels = { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+   
+    for (size_t i = 0; i < regularLabels.size(); ++i)
+        regularRateWeights[i] = parameters.getRawParameterValue("rateProb_" + regularLabels[i])->load();
+
+    for (int i = 0; i < 12; ++i)
+        nanoRateWeights[i] = parameters.getRawParameterValue("nanoProb_" + std::to_string(i))->load();
+
+    nanoBlend = parameters.getRawParameterValue("nanoBlend")->load();
+   
+
+
+}
+
+void NanoStuttAudioProcessor::initializeParameterListeners()
+{
+    static const std::array<std::string, 8> regularLabels = { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+
+    for (const auto& label : regularLabels)
+        parameters.addParameterListener("rateProb_" + label, this);
+
+    for (int i = 0; i < 12; ++i)
+        parameters.addParameterListener("nanoProb_" + std::to_string(i), this);
+
+    for (int i = 0; i < 12; ++i)
+        parameters.addParameterListener("nanoRatio_" + std::to_string(i), this);
+
+
+    parameters.addParameterListener("nanoBlend", this);
+
+    updateCachedParameters(); // Initialize
+}
+
+void NanoStuttAudioProcessor::parameterChanged(const juce::String&, float)
+{
+    updateCachedParameters(); // any change triggers full update
+}
+
 

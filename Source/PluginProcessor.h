@@ -16,7 +16,9 @@
 struct StutterState;
 
 
-class NanoStuttAudioProcessor  : public juce::AudioProcessor
+class NanoStuttAudioProcessor  : public juce::AudioProcessor,
+                                 public juce::AudioProcessorValueTreeState::Listener
+
 {
 public:
     //==============================================================================
@@ -77,6 +79,30 @@ public:
     double                    secondsPerWholeNote = 4;
     int                       manualStutterRateDenominator = -1;
     bool                      manualStutterTriggered = false;
+    // Cached parameters for real-time-safe access
+    std::array<float, 8> regularRateWeights {{ 0.0f }};
+    std::array<float, 12> nanoRateWeights {{ 0.0f }};
+    float nanoBlend = 0.0f;
+    
+
+    // Ratio/denominator lookup
+    static constexpr std::array<int, 8> regularDenominators {{ 4, 3, 6, 8, 12, 16, 24, 32 }};
+    static constexpr std::array<float, 12> nanoRatios {{
+        1.0f,
+        15.0f / 16.0f,
+        5.0f / 6.0f,
+        4.0f / 5.0f,
+        3.0f / 4.0f,
+        2.0f / 3.0f,
+        3.0f / 5.0f,
+        0.5f,
+        1.0f, 1.0f, 1.0f, 1.0f  // Fillers
+    }};
+
+    // Param listeners
+    void updateCachedParameters();
+    void initializeParameterListeners();
+    void parameterChanged(const juce::String& parameterID, float newValue) override;
 
     void setManualStutterRate(int rate) { manualStutterRateDenominator = rate; }
 
