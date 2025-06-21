@@ -139,29 +139,38 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     nanoTuneAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.parameters, "nanoTune", nanoTuneSlider);
 
-    // === Editable Nano Ratio Text Boxes ===
+    // === Editable Nano Ratio Numerator/Denominator Sliders ===
     for (int i = 0; i < 12; ++i)
     {
-        auto* editor = new juce::TextEditor();
-        editor->setInputRestrictions(0, "0123456789."); // allow only digits and decimal
-        editor->setJustification(juce::Justification::centred);
-        
-        // Set initial value
-        float ratioVal = audioProcessor.parameters.getRawParameterValue("nanoRatio_" + juce::String(i))->load();
-        editor->setText(juce::String(ratioVal, 3), juce::dontSendNotification);
-
-        // Commit on Enter or focus lost
-        editor->onReturnKey = editor->onFocusLost = [this, i, editor]() {
-            double val = editor->getText().getDoubleValue();
-            val = juce::jlimit(0.1, 2.0, val);
-            auto* param = audioProcessor.parameters.getParameter("nanoRatio_" + juce::String(i));
-            if (param != nullptr)
-                param->setValueNotifyingHost(static_cast<float>((val - 0.1) / (2.0 - 0.1))); // normalized
+        auto* numBox = new juce::TextEditor();
+        numBox->setInputRestrictions(3, "0123456789");
+        numBox->setJustification(juce::Justification::centred);
+        numBox->setText("1", juce::dontSendNotification);
+        numBox->onFocusLost = numBox->onReturnKey = [this, i, numBox]() {
+            updateNanoRatioFromFraction(i);
         };
+        addAndMakeVisible(numBox);
+        nanoNumerators.add(numBox);
 
-        addAndMakeVisible(editor);
-        nanoRatioEditors.add(editor);
+        auto* denomBox = new juce::TextEditor();
+        denomBox->setInputRestrictions(3, "0123456789");
+        denomBox->setJustification(juce::Justification::centred);
+        denomBox->setText("1", juce::dontSendNotification);
+        denomBox->onFocusLost = denomBox->onReturnKey = [this, i, denomBox]() {
+            updateNanoRatioFromFraction(i);
+        };
+        addAndMakeVisible(denomBox);
+        nanoDenominators.add(denomBox);
+
+        // Load initial value from parameter
+        float ratioVal = audioProcessor.parameters.getRawParameterValue("nanoRatio_" + juce::String(i))->load();
+        int num = static_cast<int>(std::round(ratioVal * 100));
+        int denom = 100;
+        int gcd = std::gcd(num, denom);
+        numBox->setText(juce::String(num / gcd), juce::dontSendNotification);
+        denomBox->setText(juce::String(denom / gcd), juce::dontSendNotification);
     }
+
 
 
 
@@ -237,12 +246,17 @@ void NanoStuttAudioProcessorEditor::resized()
     {
         nanoRateProbSliders[i]->setBounds(startX + i * (sliderWidth + spacing), nanoSliderY, sliderWidth, sliderHeight);
     }
-    int textEditorY = nanoSliderY - 25; // above the sliders
 
-    for (int i = 0; i < nanoRatioEditors.size(); ++i)
+    int numeratorY = nanoSliderY - 45;
+    int denominatorY = nanoSliderY - 25;
+    for (int i = 0; i < 12; ++i)
     {
-        nanoRatioEditors[i]->setBounds(startX + i * (sliderWidth + spacing), textEditorY, sliderWidth, 20);
+        int x = startX + i * (sliderWidth + spacing);
+        nanoNumerators[i]->setBounds(x, numeratorY, sliderWidth, 20);
+        nanoDenominators[i]->setBounds(x, denominatorY, sliderWidth, 20);
     }
+
+
 
 
     // === Nano Blend Slider (left side) ===
@@ -286,4 +300,23 @@ void NanoStuttAudioProcessorEditor::resized()
     // === Visualizer (Bottom) ===
     int visHeight = 70;
     visualizer.setBounds(margin, getHeight() - visHeight - margin, getWidth() - 2 * margin, visHeight);
+}
+
+void NanoStuttAudioProcessorEditor::updateNanoRatioFromFraction(int index)
+{
+    auto* numBox = nanoNumerators[index];
+    auto* denomBox = nanoDenominators[index];
+
+    int num = numBox->getText().getIntValue();
+    int denom = denomBox->getText().getIntValue();
+
+    if (num <= 0) num = 1;
+    if (denom <= 0) denom = 1;
+
+    double ratio = static_cast<double>(num) / denom;
+    ratio = juce::jlimit(0.1, 2.0, ratio);
+
+    auto* param = audioProcessor.parameters.getParameter("nanoRatio_" + juce::String(index));
+    if (param != nullptr)
+        param->setValueNotifyingHost(static_cast<float>((ratio - 0.1) / (2.0 - 0.1)));
 }

@@ -82,7 +82,8 @@ public:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoBlendAttachment;
 
     juce::OwnedArray<juce::Slider> nanoRateProbSliders;
-    juce::OwnedArray<juce::TextEditor> nanoRatioEditors;
+    juce::OwnedArray<juce::TextEditor> nanoNumerators;
+    juce::OwnedArray<juce::TextEditor> nanoDenominators;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> nanoRatioAttachments;
 
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> nanoRateProbAttachments;
@@ -102,6 +103,7 @@ public:
     //==============================================================================
     void paint (juce::Graphics&) override;
     void resized() override;
+    void updateNanoRatioFromFraction(int index);
 
 private:
     std::vector<std::unique_ptr<juce::TextButton>> manualStutterButtons;
