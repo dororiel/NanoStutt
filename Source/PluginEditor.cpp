@@ -116,6 +116,17 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     quantLabel.setText("Quant", juce::dontSendNotification);
     quantLabel.attachToComponent(&autoStutterQuantMenu, false);
     addAndMakeVisible(quantLabel);
+
+    // === Mix Mode Menu ===
+    addAndMakeVisible(mixModeMenu);
+    mixModeMenu.addItemList({ "Gate", "Insert", "Mix" }, 1);
+    mixModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.parameters, "MixMode", mixModeMenu);
+
+    juce::Label* mixModeLabel = new juce::Label();
+    mixModeLabel->setText("Mix Mode", juce::dontSendNotification);
+    mixModeLabel->attachToComponent(&mixModeMenu, false);
+    addAndMakeVisible(mixModeLabel);
     
     // === Manual Triggers ===
     for (int i = 0; i < manualStutterRates.size(); ++i)
@@ -323,6 +334,9 @@ void NanoStuttAudioProcessorEditor::resized()
     controlY += 40;
 
     stutterButton.setBounds(controlPanelX, controlY, 110, 24);
+    controlY += 30;
+
+    mixModeMenu.setBounds(controlPanelX, controlY, 110, 24);
     
     // === Tune & Blend Sliders ===
     int bottomControlsY = std::max(macroSmoothSlider.getBottom(), nanoSmoothSlider.getBottom());

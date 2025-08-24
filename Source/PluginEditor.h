@@ -85,6 +85,9 @@ public:
     juce::Label macroGateLabel, macroShapeLabel, macroSmoothLabel;
     juce::Label nanoControlsLabel, macroControlsLabel;
 
+    juce::ComboBox mixModeMenu;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mixModeAttachment;
+
     juce::Slider nanoBlendSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoBlendAttachment;
 

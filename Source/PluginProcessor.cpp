@@ -143,12 +143,11 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     juce::AudioBuffer<float> originalInput;
     originalInput.makeCopyOf(buffer);
 
-    buffer.clear();
-
     auto& params = parameters;
     bool autoStutter  = params.getRawParameterValue("autoStutterEnabled")->load();
     float chance      = params.getRawParameterValue("autoStutterChance")->load();
     int quantIndex    = (int) params.getRawParameterValue("autoStutterQuant")->load();
+    auto mixMode      = (int) params.getRawParameterValue("MixMode")->load();
 
     auto nanoGateParam = params.getRawParameterValue("NanoGate")->load();
     auto nanoShapeParam = params.getRawParameterValue("NanoShape")->load();
@@ -230,9 +229,9 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     }
 
     const bool guiStutter = *params.getRawParameterValue("stutterOn");
-    bool isStuttering = guiStutter || autoStutterActive || manualStutterTriggered;
+    bool isStutteringEvent = guiStutter || autoStutterActive || manualStutterTriggered;
 
-    if (isStuttering && !stutterLatched)
+    if (isStutteringEvent && !stutterLatched)
     {
         stutterSamplesWritten = 0;
         stutterPlayCounter = 0;
@@ -299,9 +298,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
     for (int i = 0; i < numSamples; ++i)
     {
-        bool shouldStutterThisSample = (guiStutter || (autoStutterActive && autoStutterRemainingSamples > 0) || manualStutterTriggered);
+        bool shouldPlayWetSignal = (guiStutter || (autoStutterActive && autoStutterRemainingSamples > 0) || manualStutterTriggered);
+        float wetSample = 0.0f;
 
-        if (shouldStutterThisSample)
+        if (shouldPlayWetSignal)
         {
             if (stutterPlayCounter % loopLen == 0) nanoEnvelopeCounter = 0;
 
@@ -314,13 +314,32 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             float finalGain = smoothedMacroGain * smoothedNanoGain;
 
             int readIndex = stutterPlayCounter % loopLen;
-            for (int ch = 0; ch < totalNumOutputChannels; ++ch)
-                buffer.getWritePointer(ch)[i] = stutterBuffer.getReadPointer(ch)[readIndex] * finalGain;
+            wetSample = stutterBuffer.getReadPointer(0)[readIndex] * finalGain;
             
             ++stutterPlayCounter;
             ++nanoEnvelopeCounter;
             ++macroEnvelopeCounter;
             if (autoStutterActive) --autoStutterRemainingSamples;
+        }
+
+        for (int ch = 0; ch < totalNumOutputChannels; ++ch)
+        {
+            float drySample = originalInput.getSample(ch, i);
+            float outputSample = 0.0f;
+
+            switch (mixMode)
+            {
+                case 0: // Gate
+                    outputSample = shouldPlayWetSignal ? wetSample : 0.0f;
+                    break;
+                case 1: // Insert
+                    outputSample = isStutteringEvent ? (shouldPlayWetSignal ? wetSample : 0.0f) : drySample;
+                    break;
+                case 2: // Mix
+                    outputSample = shouldPlayWetSignal ? (wetSample * 0.5f + drySample * 0.5f) : drySample;
+                    break;
+            }
+            buffer.getWritePointer(ch)[i] = outputSample;
         }
     }
 
@@ -329,7 +348,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         autoStutterActive = false;
         stutterLatched = false;
     }
-    if (!isStuttering)
+    if (!isStutteringEvent)
     {
         stutterLatched = false;
     }
@@ -419,6 +438,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterFloat>("MacroShape", "Macro Shape", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("MacroSmooth", "Macro Smooth", 0.0f, 1.0f, 0.0f));
 
+    // Mix Mode
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("MixMode", "Mix Mode", 
+        juce::StringArray{"Gate", "Insert", "Mix"}, 0));
+
     // ✅ RETURN AT THE END
     return { params.begin(), params.end() };
 }
@@ -463,4 +486,3 @@ void NanoStuttAudioProcessor::parameterChanged(const juce::String&, float)
 {
     updateCachedParameters(); // any change triggers full update
 }
-
