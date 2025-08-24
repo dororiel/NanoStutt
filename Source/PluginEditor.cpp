@@ -261,7 +261,7 @@ void NanoStuttAudioProcessorEditor::paint (juce::Graphics& g)
 
 void NanoStuttAudioProcessorEditor::resized()
 {
-    const int margin = 10;
+    const int margin = 20;
     const int spacing = 10;
     const int sliderWidth = 50;
     const int sliderHeight = 110;
@@ -319,22 +319,22 @@ void NanoStuttAudioProcessorEditor::resized()
     int controlY = panelY;
 
     autoStutterToggle.setBounds(controlPanelX, controlY, 110, 20);
-    controlY += 30;
+    controlY += 40;
 
     chanceLabel.setBounds(controlPanelX, controlY, 110, 20);
-    controlY += 20;
+    controlY += 40;
 
     autoStutterChanceSlider.setBounds(controlPanelX, controlY, 110, 30);  // Larger slider
     controlY += 40;
 
     quantLabel.setBounds(controlPanelX, controlY, 110, 20);
-    controlY += 20;
+    controlY += 40;
 
     autoStutterQuantMenu.setBounds(controlPanelX, controlY, 110, 24);
     controlY += 40;
 
     stutterButton.setBounds(controlPanelX, controlY, 110, 24);
-    controlY += 30;
+    controlY += 40;
 
     mixModeMenu.setBounds(controlPanelX, controlY, 110, 24);
     
