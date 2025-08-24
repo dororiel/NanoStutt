@@ -46,13 +46,46 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
 
     autoStutterQuantAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         audioProcessor.parameters, "autoStutterQuant", autoStutterQuantMenu);
-    
-    // === Gate Slider ===
-    addAndMakeVisible(gateSlider);
-    gateSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    gateSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
-    gateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        audioProcessor.parameters, "autoStutterGate", gateSlider);
+
+    // === Envelope Controls ===
+    auto setupKnob = [this] (juce::Slider& slider, const juce::String& paramID, std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& attachment)
+    {
+        addAndMakeVisible(slider);
+        slider.setSliderStyle(juce::Slider::RotaryVerticalDrag);
+        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
+        attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(audioProcessor.parameters, paramID, slider);
+    };
+
+    setupKnob(nanoGateSlider, "NanoGate", nanoGateAttachment);
+    setupKnob(nanoShapeSlider, "NanoShape", nanoShapeAttachment);
+    setupKnob(nanoSmoothSlider, "NanoSmooth", nanoSmoothAttachment);
+    setupKnob(macroGateSlider, "MacroGate", macroGateAttachment);
+    setupKnob(macroShapeSlider, "MacroShape", macroShapeAttachment);
+    setupKnob(macroSmoothSlider, "MacroSmooth", macroSmoothAttachment);
+
+    // === Labels ===
+    auto setupLabel = [this] (juce::Label& label, const juce::String& text, juce::Component& component)
+    {
+        label.setText(text, juce::dontSendNotification);
+        label.attachToComponent(&component, false);
+        label.setJustificationType(juce::Justification::centredBottom);
+        addAndMakeVisible(label);
+    };
+
+    setupLabel(nanoGateLabel, "Gate", nanoGateSlider);
+    setupLabel(nanoShapeLabel, "Shape", nanoShapeSlider);
+    setupLabel(nanoSmoothLabel, "Smooth", nanoSmoothSlider);
+    setupLabel(macroGateLabel, "Gate", macroGateSlider);
+    setupLabel(macroShapeLabel, "Shape", macroShapeSlider);
+    setupLabel(macroSmoothLabel, "Smooth", macroSmoothSlider);
+
+    nanoControlsLabel.setText("Nano Envelope", juce::dontSendNotification);
+    nanoControlsLabel.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(nanoControlsLabel);
+
+    macroControlsLabel.setText("Macro Envelope", juce::dontSendNotification);
+    macroControlsLabel.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(macroControlsLabel);
     
     // === Rate Sliders and buttons ===
     auto rateLabels = juce::StringArray { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
@@ -83,10 +116,6 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     quantLabel.setText("Quant", juce::dontSendNotification);
     quantLabel.attachToComponent(&autoStutterQuantMenu, false);
     addAndMakeVisible(quantLabel);
-
-    gateLabel.setText("Gate", juce::dontSendNotification);
-    gateLabel.attachToComponent(&gateSlider, false);
-    addAndMakeVisible(gateLabel);
     
     // === Manual Triggers ===
     for (int i = 0; i < manualStutterRates.size(); ++i)
@@ -226,6 +255,7 @@ void NanoStuttAudioProcessorEditor::resized()
     const int sliderWidth = 50;
     const int sliderHeight = 110;
     const int buttonHeight = 25;
+    const int knobSize = 70;
 
     const int numRates = rateProbSliders.size();
     const int totalSliderWidth = numRates * (sliderWidth + spacing) - spacing;
@@ -256,19 +286,21 @@ void NanoStuttAudioProcessorEditor::resized()
         nanoDenominators[i]->setBounds(x, denominatorY, sliderWidth, 20);
     }
 
+    // === Left-side controls ===
+    juce::Rectangle<int> leftPanel(margin, sliderY, knobSize * 2 + spacing, getHeight() - sliderY - 80);
+    
+    // Macro Controls Column
+    macroControlsLabel.setBounds(leftPanel.getX(), leftPanel.getY(), knobSize, 20);
+    macroGateSlider.setBounds(leftPanel.getX(), leftPanel.getY() + 20, knobSize, knobSize);
+    macroShapeSlider.setBounds(leftPanel.getX(), macroGateSlider.getBottom() + spacing, knobSize, knobSize);
+    macroSmoothSlider.setBounds(leftPanel.getX(), macroShapeSlider.getBottom() + spacing, knobSize, knobSize);
 
-
-
-    // === Nano Blend Slider (left side) ===
-    nanoBlendSlider.setBounds(margin, nanoSliderY + sliderHeight + 10, 150, 20);
-
-
-    // === Gate Knob (Left) ===
-    const int gateKnobSize = 60;
-    const int gateX = margin;
-    const int gateY = buttonY + buttonHeight + spacing;
-    gateSlider.setBounds(gateX, gateY, gateKnobSize, gateKnobSize);
-    gateLabel.setBounds(gateX, gateY + gateKnobSize, gateKnobSize, 20);
+    // Nano Controls Column
+    int nanoColX = leftPanel.getX() + knobSize + spacing;
+    nanoControlsLabel.setBounds(nanoColX, leftPanel.getY(), knobSize, 20);
+    nanoGateSlider.setBounds(nanoColX, leftPanel.getY() + 20, knobSize, knobSize);
+    nanoShapeSlider.setBounds(nanoColX, nanoGateSlider.getBottom() + spacing, knobSize, knobSize);
+    nanoSmoothSlider.setBounds(nanoColX, nanoShapeSlider.getBottom() + spacing, knobSize, knobSize);
 
     // === Auto Stutter Section (Right) ===
     const int controlPanelX = getWidth() - 120;
@@ -292,11 +324,11 @@ void NanoStuttAudioProcessorEditor::resized()
 
     stutterButton.setBounds(controlPanelX, controlY, 110, 24);
     
-    // === Tune Knob ===
+    // === Tune & Blend Sliders ===
+    int bottomControlsY = std::max(macroSmoothSlider.getBottom(), nanoSmoothSlider.getBottom());
+    nanoBlendSlider.setBounds(margin, bottomControlsY + spacing, 150, 20);
     nanoTuneSlider.setBounds(margin, nanoBlendSlider.getBottom() + 10, 150, 20);
     
-
-
     // === Visualizer (Bottom) ===
     int visHeight = 70;
     visualizer.setBounds(margin, getHeight() - visHeight - margin, getWidth() - 2 * margin, visHeight);

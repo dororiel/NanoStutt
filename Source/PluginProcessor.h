@@ -9,6 +9,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <juce_dsp/juce_dsp.h>
 
 //==============================================================================
 /**
@@ -79,6 +80,15 @@ public:
     double                    secondsPerWholeNote = 4;
     int                       manualStutterRateDenominator = -1;
     bool                      manualStutterTriggered = false;
+    
+    // ==== Envelope variables ====
+    int nanoEnvelopeCounter = 0;
+    int nanoEnvelopeLengthInSamples = 0;
+    int macroEnvelopeCounter = 0;
+    int macroEnvelopeLengthInSamples = 0;
+    float iirMacroGain = 0.0f;
+    float iirNanoGain = 0.0f;
+
     // Cached parameters for real-time-safe access
     std::array<float, 8> regularRateWeights {{ 0.0f }};
     std::array<float, 12> nanoRateWeights {{ 0.0f }};
