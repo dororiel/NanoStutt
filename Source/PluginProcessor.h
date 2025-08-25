@@ -88,6 +88,7 @@ public:
     int macroEnvelopeLengthInSamples = 0;
     float iirMacroGain = 0.0f;
     float iirNanoGain = 0.0f;
+    
 
     // Cached parameters for real-time-safe access
     std::array<float, 8> regularRateWeights {{ 0.0f }};

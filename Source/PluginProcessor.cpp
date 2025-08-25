@@ -242,8 +242,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         stutterLatched = true;
 
         macroEnvelopeCounter = 0;
-        iirMacroGain = 0.0f;
-        iirNanoGain = 0.0f;
         if (autoStutterActive)
             macroEnvelopeLengthInSamples = autoStutterRemainingSamples;
         else 
@@ -274,12 +272,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         return juce::jmap(curveAmount, 0.0f, 1.0f, 1.0f, curvedGain);
     };
 
-    auto applyIIRFilter = [](float& iirState, float target, float smoothParam) {
-        float alpha = juce::jmap(smoothParam, 0.0f, 1.0f, 1.0f, 0.001f);
-        iirState += (target - iirState) * alpha;
-        return iirState;
-    };
-
     int loopLen = 1;
     if (stutterLatched) {
         if (auto* playHead = getPlayHead()) { if (auto position = playHead->getPosition()) {
@@ -299,31 +291,50 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     for (int i = 0; i < numSamples; ++i)
     {
         bool shouldPlayWetSignal = (guiStutter || (autoStutterActive && autoStutterRemainingSamples > 0) || manualStutterTriggered);
-        float wetSample = 0.0f;
+        
+        float macroGain = 0.0f;
+        float nanoGain = 0.0f;
 
         if (shouldPlayWetSignal)
         {
             if (stutterPlayCounter % loopLen == 0) nanoEnvelopeCounter = 0;
 
-            float targetMacroGain = (macroEnvelopeCounter < effectiveMacroLength) ? calculateGain((float)macroEnvelopeCounter / (float)effectiveMacroLength, macroShapeParam) : 0.0f;
-            float smoothedMacroGain = applyIIRFilter(iirMacroGain, targetMacroGain, macroSmoothParam);
-
-            float targetNanoGain = (nanoEnvelopeCounter < nanoEnvelopeLengthInSamples) ? calculateGain((float)nanoEnvelopeCounter / (float)nanoEnvelopeLengthInSamples, nanoShapeParam) : 0.0f;
-            float smoothedNanoGain = applyIIRFilter(iirNanoGain, targetNanoGain, nanoSmoothParam);
-
-            float finalGain = smoothedMacroGain * smoothedNanoGain;
-
-            int readIndex = stutterPlayCounter % loopLen;
-            wetSample = stutterBuffer.getReadPointer(0)[readIndex] * finalGain;
+            // Macro Envelope
+            float macroProgress = (float)macroEnvelopeCounter / (float)effectiveMacroLength;
+            macroGain = (macroEnvelopeCounter < effectiveMacroLength) ? calculateGain(macroProgress, macroShapeParam) : 0.0f;
             
-            ++stutterPlayCounter;
-            ++nanoEnvelopeCounter;
-            ++macroEnvelopeCounter;
-            if (autoStutterActive) --autoStutterRemainingSamples;
+            // Macro Smooth: Windowing
+            float macroFadeLength = macroSmoothParam * 0.5f; // 0 to 0.5
+            if (macroProgress < macroFadeLength && macroFadeLength > 0.0f)
+                macroGain *= macroProgress / macroFadeLength;
+            else if (macroProgress > (1.0f - macroFadeLength) && macroFadeLength > 0.0f)
+                macroGain *= (1.0f - macroProgress) / macroFadeLength;
+
+            // Nano Envelope
+            float nanoProgress = (float)nanoEnvelopeCounter / (float)nanoEnvelopeLengthInSamples;
+            nanoGain = (nanoEnvelopeCounter < nanoEnvelopeLengthInSamples) ? calculateGain(nanoProgress, nanoShapeParam) : 0.0f;
+
+            // Nano Smooth: Crossfading
+            float nanoFadeTime = juce::jmap(nanoSmoothParam, 0.0f, 1.0f, 0.0f, 0.5f) * (float)nanoEnvelopeLengthInSamples;
+            if (nanoEnvelopeCounter < nanoFadeTime && nanoFadeTime > 0)
+                nanoGain *= (float)nanoEnvelopeCounter / nanoFadeTime;
+            else if (nanoEnvelopeCounter > nanoEnvelopeLengthInSamples - nanoFadeTime && nanoFadeTime > 0)
+                nanoGain *= (float)(nanoEnvelopeLengthInSamples - nanoEnvelopeCounter) / nanoFadeTime;
         }
+
+        float finalGain = macroGain * nanoGain;
+        int readIndex = stutterPlayCounter % loopLen;
 
         for (int ch = 0; ch < totalNumOutputChannels; ++ch)
         {
+            float wetSample = 0.0f;
+            if (shouldPlayWetSignal)
+            {
+                int readChannel = (stutterBuffer.getNumChannels() > ch) ? ch : 0;
+                if (stutterBuffer.getNumChannels() > 0)
+                    wetSample = stutterBuffer.getReadPointer(readChannel)[readIndex] * finalGain;
+            }
+
             float drySample = originalInput.getSample(ch, i);
             float outputSample = 0.0f;
 
@@ -340,6 +351,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     break;
             }
             buffer.getWritePointer(ch)[i] = outputSample;
+        }
+
+        if (shouldPlayWetSignal)
+        {
+            ++stutterPlayCounter;
+            ++nanoEnvelopeCounter;
+            ++macroEnvelopeCounter;
+            if (autoStutterActive) --autoStutterRemainingSamples;
         }
     }
 
