@@ -80,6 +80,11 @@ public:
     double                    secondsPerWholeNote = 4;
     int                       manualStutterRateDenominator = -1;
     bool                      manualStutterTriggered = false;
+
+    // ==== Manual Crossfade ====
+    float crossfadeWet = 0.0f;
+    int fadeSamplesRemaining = 0;
+    int fadeLengthInSamples = 0;
     
     // ==== Envelope variables ====
     int nanoEnvelopeCounter = 0;

@@ -17,9 +17,7 @@ NanoStuttAudioProcessor::NanoStuttAudioProcessor()
       parameters(*this, nullptr, "PARAMETERS", createParameterLayout())
 {
     initializeParameterListeners();
-
 }
-
 
 NanoStuttAudioProcessor::~NanoStuttAudioProcessor()
 {
@@ -60,13 +58,12 @@ bool NanoStuttAudioProcessor::isMidiEffect() const
 
 double NanoStuttAudioProcessor::getTailLengthSeconds() const
 {
-    return 0.0;
+    return 0.1;
 }
 
 int NanoStuttAudioProcessor::getNumPrograms()
 {
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
+    return 1;
 }
 
 int NanoStuttAudioProcessor::getCurrentProgram()
@@ -90,21 +87,14 @@ void NanoStuttAudioProcessor::changeProgramName (int index, const juce::String& 
 //==============================================================================
 void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
-    // ----- stutter: allocate ~4 s buffer -----
     const double maxStutterSeconds = 3.0;
-    writePos = 0;
     maxStutterLenSamples = static_cast<int>(sampleRate * maxStutterSeconds);
-
+    stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
+    fadeLengthInSamples = static_cast<int>(sampleRate * 0.002); // 2ms fade
 }
-
-
 
 void NanoStuttAudioProcessor::releaseResources()
 {
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
 }
 
 #ifndef JucePlugin_PreferredChannelConfigurations
@@ -114,19 +104,11 @@ bool NanoStuttAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts
     juce::ignoreUnused (layouts);
     return true;
   #else
-    // This is the place where you check if the layout is supported.
-    // In this template code we only support mono or stereo.
-    // Some plugin hosts, such as certain GarageBand versions, will only
-    // load plugins that support stereo bus layouts.
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-     && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
-
-    // This checks if the input layout matches the output layout
-   #if ! JucePlugin_IsSynth
     if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
         return false;
-   #endif
+
+    if (layouts.getMainOutputChannelSet().size() != 1 && layouts.getMainOutputChannelSet().size() != 2)
+        return false;
 
     return true;
   #endif
@@ -139,9 +121,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     auto totalNumOutputChannels = getTotalNumOutputChannels();
     auto numSamples             = buffer.getNumSamples();
     auto sampleRate             = getSampleRate();
-
-    juce::AudioBuffer<float> originalInput;
-    originalInput.makeCopyOf(buffer);
 
     auto& params = parameters;
     bool autoStutter  = params.getRawParameterValue("autoStutterEnabled")->load();
@@ -156,114 +135,23 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     auto macroShapeParam = params.getRawParameterValue("MacroShape")->load();
     auto macroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
 
-    if (!(*params.getRawParameterValue("stutterOn")) && autoStutter)
-    {
-        if (auto* playHead = getPlayHead())
+    double ppqAtStartOfBlock = 0.0;
+    double bpm = 120.0;
+    if (auto* playHead = getPlayHead())
+        if (auto position = playHead->getPosition())
         {
-            if (auto position = playHead->getPosition())
-            {
-                auto ppq = position->getPpqPosition();
-                if (ppq.hasValue())
-                {
-                    double bpm = position->getBpm().orFallback(120.0);
-                    double quantUnit = 1.0 / std::pow(2.0, quantIndex);
-                    double quantizedBeat = std::floor(*ppq / quantUnit);
-
-                    if (quantizedBeat != lastQuantizedBeat)
-                    {
-                        lastQuantizedBeat = quantizedBeat;
-                        secondsPerWholeNote = 240.0 / bpm;
-                        bool useNano = juce::Random::getSystemRandom().nextFloat() < nanoBlend;
-
-                        auto getWeightedIndex = [](const auto& weights) {
-                            int idx = 0;
-                            float total = std::accumulate(weights.begin(), weights.end(), 0.0f);
-                            if (total > 0.0f) {
-                                float r = juce::Random::getSystemRandom().nextFloat() * total;
-                                float accum = 0.0f;
-                                for (int i = 0; i < (int)weights.size(); ++i) {
-                                    accum += weights[i];
-                                    if (r <= accum) { idx = i; break; }
-                                }
-                            }
-                            return idx;
-                        };
-
-                        int selectedIndex = useNano ? getWeightedIndex(nanoRateWeights) : getWeightedIndex(regularRateWeights);
-
-                        if (useNano)
-                        {
-                            double currentNanoTune = params.getRawParameterValue("nanoTune")->load();
-                            double nanoBase = ((60.0 / bpm) / 16.0) / currentNanoTune;
-                            double sliceDuration = nanoBase / params.getRawParameterValue("nanoRatio_" + std::to_string(selectedIndex))->load();
-                            chosenDenominator = 240.0 / (bpm * sliceDuration);
-                        }
-                        else
-                        {
-                            chosenDenominator = regularDenominators[selectedIndex];
-                        }
-
-                        if (juce::Random::getSystemRandom().nextFloat() < chance)
-                        {
-                            float gateScale = params.getRawParameterValue("autoStutterGate")->load();
-                            double quantDurationSeconds = (240.0 / bpm) * (1.0 / std::pow(2.0, quantIndex + 2));
-                            double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
-                            autoStutterRemainingSamples = static_cast<int>(sampleRate * gateDurationSeconds);
-                            autoStutterActive = true;
-                            stutterLatched = false;
-                        }
-                    }
-                }
-            }
+            ppqAtStartOfBlock = position->getPpqPosition().orFallback(0.0);
+            bpm = position->getBpm().orFallback(120.0);
         }
-    }
 
-    if (manualStutterTriggered && manualStutterRateDenominator > 0)
-    {
-        chosenDenominator = manualStutterRateDenominator;
-        double bpm = 120.0;
-        if (auto* playHead = getPlayHead()) { if (auto position = playHead->getPosition()) bpm = position->getBpm().orFallback(120.0); }
-        secondsPerWholeNote = 240.0 / bpm;
-        autoStutterRemainingSamples = static_cast<int>((secondsPerWholeNote / chosenDenominator) * getSampleRate());
-        autoStutterActive = false;
-    }
+    double ppqPerSample = (bpm / 60.0) / sampleRate;
+    double quantUnit = 1.0 / std::pow(2.0, quantIndex);
 
-    const bool guiStutter = *params.getRawParameterValue("stutterOn");
-    bool isStutteringEvent = guiStutter || autoStutterActive || manualStutterTriggered;
-
-    if (isStutteringEvent && !stutterLatched)
-    {
-        stutterSamplesWritten = 0;
-        stutterPlayCounter = 0;
-        stutterWritePos = 0;
-        maxStutterLenSamples = static_cast<int>(3.0 * sampleRate);
-        stutterBuffer.setSize(buffer.getNumChannels(), maxStutterLenSamples);
-        stutterBuffer.clear();
-        stutterLatched = true;
-
-        macroEnvelopeCounter = 0;
-        if (autoStutterActive)
-            macroEnvelopeLengthInSamples = autoStutterRemainingSamples;
-        else 
-            macroEnvelopeLengthInSamples = std::numeric_limits<int>::max();
-    }
-
-    if (stutterLatched)
-    {
-        for (int ch = 0; ch < originalInput.getNumChannels(); ++ch)
-        {
-            auto* in = originalInput.getReadPointer(ch);
-            auto* sb = stutterBuffer.getWritePointer(ch);
-            for (int i = 0; i < numSamples && stutterSamplesWritten < maxStutterLenSamples; ++i)
-            {
-                sb[(stutterWritePos + i) % maxStutterLenSamples] = in[i];
-                ++stutterSamplesWritten;
-            }
-        }
-        if (stutterSamplesWritten < maxStutterLenSamples)
-            stutterWritePos = (stutterWritePos + std::min(numSamples, maxStutterLenSamples - stutterSamplesWritten)) % maxStutterLenSamples;
-    }
-
+    // Continuous capture into history buffer
+    stutterBuffer.copyFrom(0, writePos, buffer, 0, 0, numSamples);
+    if (totalNumOutputChannels > 1)
+        stutterBuffer.copyFrom(1, writePos, buffer, 1, 0, numSamples);
+    
     auto calculateGain = [](float progress, float shapeParam) {
         float mappedShape = (shapeParam - 0.5f) * 2.0f;
         float curveAmount = std::abs(mappedShape);
@@ -272,112 +160,136 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         return juce::jmap(curveAmount, 0.0f, 1.0f, 1.0f, curvedGain);
     };
 
-    int loopLen = 1;
-    if (stutterLatched) {
-        if (auto* playHead = getPlayHead()) { if (auto position = playHead->getPosition()) {
-            double bpm = position->getBpm().orFallback(120.0);
-            secondsPerWholeNote = 240.0 / bpm;
-            chosenDenominator = manualStutterRateDenominator > 0 ? manualStutterRateDenominator : chosenDenominator;
-            loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate), 1, stutterSamplesWritten);
-        }}
-    }
-
-    float nanoGateMultiplier = 0.25f + nanoGateParam * 0.75f;
-    nanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
-
-    float macroGateMultiplier = 0.25f + macroGateParam * 0.75f;
-    int effectiveMacroLength = static_cast<int>((float)macroEnvelopeLengthInSamples * macroGateMultiplier);
-
     for (int i = 0; i < numSamples; ++i)
     {
-        bool shouldPlayWetSignal = (guiStutter || (autoStutterActive && autoStutterRemainingSamples > 0) || manualStutterTriggered);
-        
-        float macroGain = 0.0f;
-        float nanoGain = 0.0f;
+        double currentPpq = ppqAtStartOfBlock + (i * ppqPerSample);
+        double quantizedBeat = std::floor(currentPpq / quantUnit);
 
-        if (shouldPlayWetSignal)
+        if (quantizedBeat != lastQuantizedBeat)
         {
-            if (stutterPlayCounter % loopLen == 0) nanoEnvelopeCounter = 0;
+            lastQuantizedBeat = quantizedBeat;
+            if (autoStutter && juce::Random::getSystemRandom().nextFloat() < chance)
+            {
+                autoStutterActive = true;
+                stutterLatched = false; 
+                secondsPerWholeNote = 240.0 / bpm;
+                bool useNano = juce::Random::getSystemRandom().nextFloat() < nanoBlend;
+                auto getWeightedIndex = [](const auto& weights) {
+                    int idx = 0; float total = std::accumulate(weights.begin(), weights.end(), 0.0f);
+                    if (total > 0.0f) {
+                        float r = juce::Random::getSystemRandom().nextFloat() * total; float accum = 0.0f;
+                        for (int j = 0; j < (int)weights.size(); ++j) {
+                            accum += weights[j]; if (r <= accum) { idx = j; break; }
+                        }
+                    } return idx;
+                };
+                int selectedIndex = useNano ? getWeightedIndex(nanoRateWeights) : getWeightedIndex(regularRateWeights);
+                if (useNano) {
+                    double currentNanoTune = params.getRawParameterValue("nanoTune")->load();
+                    double nanoBase = ((60.0 / bpm) / 16.0) / currentNanoTune;
+                    double sliceDuration = nanoBase / params.getRawParameterValue("nanoRatio_" + std::to_string(selectedIndex))->load();
+                    chosenDenominator = 240.0 / (bpm * sliceDuration);
+                } else {
+                    chosenDenominator = regularDenominators[selectedIndex];
+                }
+                float gateScale = params.getRawParameterValue("autoStutterGate")->load();
+                double quantDurationSeconds = (240.0 / bpm) * (1.0 / std::pow(2.0, quantIndex + 2));
+                double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
+                autoStutterRemainingSamples = static_cast<int>(sampleRate * gateDurationSeconds);
+                fadeSamplesRemaining = fadeLengthInSamples;
+            }
+        }
 
-            // Macro Envelope
+        bool isStutteringEvent = autoStutterActive || *params.getRawParameterValue("stutterOn");
+
+        if (isStutteringEvent && !stutterLatched)
+        {
+            stutterPlayCounter = 0;
+            stutterWritePos = (writePos + i) % maxStutterLenSamples;
+            stutterLatched = true;
+            macroEnvelopeCounter = 0;
+            if (autoStutterActive) macroEnvelopeLengthInSamples = autoStutterRemainingSamples;
+            else macroEnvelopeLengthInSamples = std::numeric_limits<int>::max();
+        }
+
+        if (fadeSamplesRemaining > 0)
+        {
+            crossfadeWet = 1.0f - ((float)fadeSamplesRemaining / (float)fadeLengthInSamples);
+            fadeSamplesRemaining--;
+        }
+
+        if (stutterLatched)
+        {
+            int loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate), 1, maxStutterLenSamples);
+            int readIndex = (stutterWritePos + stutterPlayCounter) % maxStutterLenSamples;
+
+            float nanoGateMultiplier = 0.25f + nanoGateParam * 0.75f;
+            nanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
+            float macroGateMultiplier = 0.25f + macroGateParam * 0.75f;
+            int effectiveMacroLength = static_cast<int>((float)macroEnvelopeLengthInSamples * macroGateMultiplier);
+
             float macroProgress = (float)macroEnvelopeCounter / (float)effectiveMacroLength;
-            macroGain = (macroEnvelopeCounter < effectiveMacroLength) ? calculateGain(macroProgress, macroShapeParam) : 0.0f;
+            float macroGain = (macroEnvelopeCounter < effectiveMacroLength) ? calculateGain(macroProgress, macroShapeParam) : 0.0f;
             
-            // Macro Smooth: Windowing
-            float macroFadeLength = macroSmoothParam * 0.5f; // 0 to 0.5
-            if (macroProgress < macroFadeLength && macroFadeLength > 0.0f)
-                macroGain *= macroProgress / macroFadeLength;
-            else if (macroProgress > (1.0f - macroFadeLength) && macroFadeLength > 0.0f)
-                macroGain *= (1.0f - macroProgress) / macroFadeLength;
+            float macroFadeLength = macroSmoothParam * 0.5f;
+            if (macroProgress < macroFadeLength && macroFadeLength > 0.0f) macroGain *= macroProgress / macroFadeLength;
+            else if (macroProgress > (1.0f - macroFadeLength) && macroFadeLength > 0.0f) macroGain *= (1.0f - macroProgress) / macroFadeLength;
 
-            // Nano Envelope
-            float nanoProgress = (float)nanoEnvelopeCounter / (float)nanoEnvelopeLengthInSamples;
-            nanoGain = (nanoEnvelopeCounter < nanoEnvelopeLengthInSamples) ? calculateGain(nanoProgress, nanoShapeParam) : 0.0f;
+            float nanoProgress = (float)(stutterPlayCounter % loopLen) / (float)nanoEnvelopeLengthInSamples;
+            float nanoGain = ((stutterPlayCounter % loopLen) < nanoEnvelopeLengthInSamples) ? calculateGain(nanoProgress, nanoShapeParam) : 0.0f;
 
-            // Nano Smooth: Crossfading
             float nanoFadeTime = juce::jmap(nanoSmoothParam, 0.0f, 1.0f, 0.0f, 0.5f) * (float)nanoEnvelopeLengthInSamples;
-            if (nanoEnvelopeCounter < nanoFadeTime && nanoFadeTime > 0)
-                nanoGain *= (float)nanoEnvelopeCounter / nanoFadeTime;
-            else if (nanoEnvelopeCounter > nanoEnvelopeLengthInSamples - nanoFadeTime && nanoFadeTime > 0)
-                nanoGain *= (float)(nanoEnvelopeLengthInSamples - nanoEnvelopeCounter) / nanoFadeTime;
-        }
+            if ((stutterPlayCounter % loopLen) < nanoFadeTime && nanoFadeTime > 0) nanoGain *= (float)(stutterPlayCounter % loopLen) / nanoFadeTime;
+            else if ((stutterPlayCounter % loopLen) > nanoEnvelopeLengthInSamples - nanoFadeTime && nanoFadeTime > 0) nanoGain *= (float)(nanoEnvelopeLengthInSamples - (stutterPlayCounter % loopLen)) / nanoFadeTime;
 
-        float finalGain = macroGain * nanoGain;
-        int readIndex = stutterPlayCounter % loopLen;
+            float finalGain = macroGain * nanoGain;
 
-        for (int ch = 0; ch < totalNumOutputChannels; ++ch)
-        {
-            float wetSample = 0.0f;
-            if (shouldPlayWetSignal)
+            for (int ch = 0; ch < totalNumOutputChannels; ++ch)
             {
-                int readChannel = (stutterBuffer.getNumChannels() > ch) ? ch : 0;
-                if (stutterBuffer.getNumChannels() > 0)
-                    wetSample = stutterBuffer.getReadPointer(readChannel)[readIndex] * finalGain;
+                float wetSample = stutterBuffer.getSample(ch, readIndex) * finalGain;
+                float drySample = buffer.getSample(ch, i);
+                float outputSample = 0.0f;
+
+                switch (mixMode)
+                {
+                    case 0: // Gate
+                        outputSample = wetSample * crossfadeWet;
+                        break;
+                    case 1: // Insert
+                        outputSample = drySample * (1.0f - crossfadeWet) + wetSample * crossfadeWet;
+                        break;
+                    case 2: // Mix
+                        outputSample = drySample + (wetSample - drySample) * 0.5f * crossfadeWet;
+                        break;
+                }
+                buffer.setSample(ch, i, outputSample);
             }
-
-            float drySample = originalInput.getSample(ch, i);
-            float outputSample = 0.0f;
-
-            switch (mixMode)
-            {
-                case 0: // Gate
-                    outputSample = shouldPlayWetSignal ? wetSample : 0.0f;
-                    break;
-                case 1: // Insert
-                    outputSample = isStutteringEvent ? (shouldPlayWetSignal ? wetSample : 0.0f) : drySample;
-                    break;
-                case 2: // Mix
-                    outputSample = shouldPlayWetSignal ? (wetSample * 0.5f + drySample * 0.5f) : drySample;
-                    break;
-            }
-            buffer.getWritePointer(ch)[i] = outputSample;
-        }
-
-        if (shouldPlayWetSignal)
-        {
-            ++stutterPlayCounter;
-            ++nanoEnvelopeCounter;
-            ++macroEnvelopeCounter;
+            stutterPlayCounter = (stutterPlayCounter + 1) % loopLen;
+            macroEnvelopeCounter++;
             if (autoStutterActive) --autoStutterRemainingSamples;
         }
-    }
 
-    if (autoStutterActive && autoStutterRemainingSamples <= 0)
-    {
-        autoStutterActive = false;
-        stutterLatched = false;
+        if (autoStutterActive && autoStutterRemainingSamples <= 0)
+        {
+            autoStutterActive = false;
+            stutterLatched = false;
+            fadeSamplesRemaining = fadeLengthInSamples;
+        }
+        
+        if (!isStutteringEvent && crossfadeWet > 0.0f)
+        {
+             crossfadeWet -= 1.0f / fadeLengthInSamples;
+             if (crossfadeWet < 0.0f) crossfadeWet = 0.0f;
+        }
     }
-    if (!isStutteringEvent)
-    {
-        stutterLatched = false;
-    }
+    writePos = (writePos + numSamples) % maxStutterLenSamples;
 }
 
 
 //==============================================================================
 bool NanoStuttAudioProcessor::hasEditor() const
 {
-    return true; // (change this to false if you choose to not supply an editor)
+    return true;
 }
 
 juce::AudioProcessorEditor* NanoStuttAudioProcessor::createEditor()
@@ -388,19 +300,13 @@ juce::AudioProcessorEditor* NanoStuttAudioProcessor::createEditor()
 //==============================================================================
 void NanoStuttAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
 }
 
 void NanoStuttAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
 }
 
 //==============================================================================
-// This creates new instances of the plugin..
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new NanoStuttAudioProcessor();
@@ -419,7 +325,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         "autoStutterQuant", "Auto Stutter Quantization",
         juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 1));
 
-    // Traditional stutter rate probabilities
     auto rateLabels = juce::StringArray { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
     for (const auto& label : rateLabels)
     {
@@ -427,18 +332,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.0f, 1.0f, 0.0f));
     }
 
-    // Nano stutter rate probabilities
     for (int i = 0; i < 12; ++i)
     {
         juce::String id = "nanoProb_" + juce::String(i);
         params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.0f, 1.0f, 0.0f));
     }
 
-
-    // Blend between traditional and nano set
     params.push_back(std::make_unique<juce::AudioParameterFloat>("nanoBlend", "Repeat/Nano", 0.0f, 1.0f, 0.0f));
-
-    // Nano tune and editable ratios
     params.push_back(std::make_unique<juce::AudioParameterFloat>("nanoTune", "Nano Tune", 0.75f, 2.0f, 1.0f));
 
     for (int i = 0; i < 12; ++i)
@@ -448,23 +348,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.1f, 2.0f, defaultRatio));
     }
 
-    // Envelope Controls
     params.push_back(std::make_unique<juce::AudioParameterFloat>("NanoGate", "Nano Gate", 0.0f, 1.0f, 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("NanoShape", "Nano Shape", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("NanoSmooth", "Nano Smooth", 0.0f, 1.0f, 0.0f));
-
     params.push_back(std::make_unique<juce::AudioParameterFloat>("MacroGate", "Macro Gate", 0.0f, 1.0f, 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("MacroShape", "Macro Shape", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("MacroSmooth", "Macro Smooth", 0.0f, 1.0f, 0.0f));
-
-    // Mix Mode
     params.push_back(std::make_unique<juce::AudioParameterChoice>("MixMode", "Mix Mode", 
         juce::StringArray{"Gate", "Insert", "Mix"}, 0));
 
-    // ✅ RETURN AT THE END
     return { params.begin(), params.end() };
 }
-
 
 void NanoStuttAudioProcessor::updateCachedParameters()
 {
@@ -477,9 +371,6 @@ void NanoStuttAudioProcessor::updateCachedParameters()
         nanoRateWeights[i] = parameters.getRawParameterValue("nanoProb_" + std::to_string(i))->load();
 
     nanoBlend = parameters.getRawParameterValue("nanoBlend")->load();
-   
-
-
 }
 
 void NanoStuttAudioProcessor::initializeParameterListeners()
@@ -495,13 +386,12 @@ void NanoStuttAudioProcessor::initializeParameterListeners()
     for (int i = 0; i < 12; ++i)
         parameters.addParameterListener("nanoRatio_" + std::to_string(i), this);
 
-
     parameters.addParameterListener("nanoBlend", this);
 
-    updateCachedParameters(); // Initialize
+    updateCachedParameters();
 }
 
 void NanoStuttAudioProcessor::parameterChanged(const juce::String&, float)
 {
-    updateCachedParameters(); // any change triggers full update
+    updateCachedParameters();
 }
