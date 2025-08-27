@@ -90,7 +90,7 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     const double maxStutterSeconds = 3.0;
     maxStutterLenSamples = static_cast<int>(sampleRate * maxStutterSeconds);
     stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
-    fadeLengthInSamples = static_cast<int>(sampleRate * 0.002); // 2ms fade
+    fadeLengthInSamples = static_cast<int>(sampleRate * 0.001); // 1ms fade
 }
 
 void NanoStuttAudioProcessor::releaseResources()
@@ -147,7 +147,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     double ppqPerSample = (bpm / 60.0) / sampleRate;
     double quantUnit = 1.0 / std::pow(2.0, quantIndex);
 
-    // Continuous capture into history buffer
     stutterBuffer.copyFrom(0, writePos, buffer, 0, 0, numSamples);
     if (totalNumOutputChannels > 1)
         stutterBuffer.copyFrom(1, writePos, buffer, 1, 0, numSamples);
@@ -160,15 +159,30 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         return juce::jmap(curveAmount, 0.0f, 1.0f, 1.0f, curvedGain);
     };
 
+    const float fadeIncrement = (fadeLengthInSamples > 0) ? 1.0f / (float)fadeLengthInSamples : 1.0f;
+
     for (int i = 0; i < numSamples; ++i)
     {
         double currentPpq = ppqAtStartOfBlock + (i * ppqPerSample);
-        double quantizedBeat = std::floor(currentPpq / quantUnit);
 
-        if (quantizedBeat != lastQuantizedBeat)
+        // --- Mid-point decision logic ---
+        double decisionBeat = std::floor(currentPpq / quantUnit + 0.5);
+        if (decisionBeat != lastDecisionBeat)
+        {
+            lastDecisionBeat = decisionBeat;
+            if (autoStutter && juce::Random::getSystemRandom().nextFloat() < chance)
+                stutterIsScheduled = true;
+        }
+
+        // --- Beat boundary logic ---
+        double quantizedBeat = std::floor(currentPpq / quantUnit);
+        bool isNewBeat = (quantizedBeat != lastQuantizedBeat);
+        if (isNewBeat)
         {
             lastQuantizedBeat = quantizedBeat;
-            if (autoStutter && juce::Random::getSystemRandom().nextFloat() < chance)
+            if (postStutterSilence > 0) postStutterSilence = 0;
+
+            if (stutterIsScheduled)
             {
                 autoStutterActive = true;
                 stutterLatched = false; 
@@ -196,32 +210,48 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 double quantDurationSeconds = (240.0 / bpm) * (1.0 / std::pow(2.0, quantIndex + 2));
                 double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
                 autoStutterRemainingSamples = static_cast<int>(sampleRate * gateDurationSeconds);
-                fadeSamplesRemaining = fadeLengthInSamples;
+                stutterIsScheduled = false;
             }
         }
 
         bool isStutteringEvent = autoStutterActive || *params.getRawParameterValue("stutterOn");
-
         if (isStutteringEvent && !stutterLatched)
         {
             stutterPlayCounter = 0;
             stutterWritePos = (writePos + i) % maxStutterLenSamples;
             stutterLatched = true;
             macroEnvelopeCounter = 0;
-            if (autoStutterActive) macroEnvelopeLengthInSamples = autoStutterRemainingSamples;
-            else macroEnvelopeLengthInSamples = std::numeric_limits<int>::max();
+            macroEnvelopeLengthInSamples = autoStutterActive ? autoStutterRemainingSamples : std::numeric_limits<int>::max();
         }
 
-        if (fadeSamplesRemaining > 0)
-        {
-            crossfadeWet = 1.0f - ((float)fadeSamplesRemaining / (float)fadeLengthInSamples);
-            fadeSamplesRemaining--;
-        }
+        // --- Pre-emptive Crossfade Logic ---
+        double nextBeatPpq = (quantizedBeat + 1.0) * quantUnit;
+        int samplesToNextBeat = static_cast<int>((nextBeatPpq - currentPpq) / ppqPerSample);
+        float targetCrossfade = eventCrossfade;
 
+        bool needsFadeIn = (macroSmoothParam > 0.0f || macroShapeParam > 0.5f);
+        bool isEndingFullEvent = (autoStutterActive && autoStutterRemainingSamples <= samplesToNextBeat && macroGateParam >= 1.0f);
+
+        if (stutterIsScheduled && needsFadeIn && samplesToNextBeat < fadeLengthInSamples)
+            targetCrossfade = 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples;
+        else if (isEndingFullEvent && samplesToNextBeat < fadeLengthInSamples)
+            targetCrossfade = (float)samplesToNextBeat / (float)fadeLengthInSamples;
+        else if (isStutteringEvent || postStutterSilence > 0)
+            targetCrossfade = 1.0f;
+        else
+            targetCrossfade = 0.0f;
+
+        if (eventCrossfade < targetCrossfade)
+            eventCrossfade = std::min(targetCrossfade, eventCrossfade + fadeIncrement);
+        else if (eventCrossfade > targetCrossfade)
+            eventCrossfade = std::max(targetCrossfade, eventCrossfade - fadeIncrement);
+
+        // --- Main Processing ---
         if (stutterLatched)
         {
             int loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate), 1, maxStutterLenSamples);
             int readIndex = (stutterWritePos + stutterPlayCounter) % maxStutterLenSamples;
+            int loopPos = stutterPlayCounter % loopLen;
 
             float nanoGateMultiplier = 0.25f + nanoGateParam * 0.75f;
             nanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
@@ -235,51 +265,57 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             if (macroProgress < macroFadeLength && macroFadeLength > 0.0f) macroGain *= macroProgress / macroFadeLength;
             else if (macroProgress > (1.0f - macroFadeLength) && macroFadeLength > 0.0f) macroGain *= (1.0f - macroProgress) / macroFadeLength;
 
-            float nanoProgress = (float)(stutterPlayCounter % loopLen) / (float)nanoEnvelopeLengthInSamples;
-            float nanoGain = ((stutterPlayCounter % loopLen) < nanoEnvelopeLengthInSamples) ? calculateGain(nanoProgress, nanoShapeParam) : 0.0f;
+            float nanoProgress = (float)loopPos / (float)nanoEnvelopeLengthInSamples;
+            float nanoGain = (loopPos < nanoEnvelopeLengthInSamples) ? calculateGain(nanoProgress, nanoShapeParam) : 0.0f;
 
-            float nanoFadeTime = juce::jmap(nanoSmoothParam, 0.0f, 1.0f, 0.0f, 0.5f) * (float)nanoEnvelopeLengthInSamples;
-            if ((stutterPlayCounter % loopLen) < nanoFadeTime && nanoFadeTime > 0) nanoGain *= (float)(stutterPlayCounter % loopLen) / nanoFadeTime;
-            else if ((stutterPlayCounter % loopLen) > nanoEnvelopeLengthInSamples - nanoFadeTime && nanoFadeTime > 0) nanoGain *= (float)(nanoEnvelopeLengthInSamples - (stutterPlayCounter % loopLen)) / nanoFadeTime;
+            float wetGain = 1.0f;
+            if (autoStutterActive && autoStutterRemainingSamples <= fadeLengthInSamples)
+                wetGain = (float)autoStutterRemainingSamples / (float)fadeLengthInSamples;
+            if (postStutterSilence > 0) wetGain = 0.0f;
 
-            float finalGain = macroGain * nanoGain;
+            float finalGain = macroGain * nanoGain * wetGain;
 
             for (int ch = 0; ch < totalNumOutputChannels; ++ch)
             {
                 float wetSample = stutterBuffer.getSample(ch, readIndex) * finalGain;
-                float drySample = buffer.getSample(ch, i);
-                float outputSample = 0.0f;
 
-                switch (mixMode)
+                int nanoFadeLen = static_cast<int>((float)loopLen * nanoSmoothParam * 0.5f);
+                if (nanoFadeLen > 1 && loopPos >= loopLen - nanoFadeLen)
                 {
-                    case 0: // Gate
-                        outputSample = wetSample * crossfadeWet;
-                        break;
-                    case 1: // Insert
-                        outputSample = drySample * (1.0f - crossfadeWet) + wetSample * crossfadeWet;
-                        break;
-                    case 2: // Mix
-                        outputSample = drySample + (wetSample - drySample) * 0.5f * crossfadeWet;
-                        break;
+                    int startOfLoopReadIndex = (stutterWritePos + stutterPlayCounter - loopPos) % maxStutterLenSamples;
+                    float incomingSample = stutterBuffer.getSample(ch, startOfLoopReadIndex) * finalGain;
+                    float fadeProgress = (float)(loopPos - (loopLen - nanoFadeLen)) / (float)nanoFadeLen;
+                    wetSample = wetSample * (1.0f - fadeProgress) + incomingSample * fadeProgress;
                 }
+
+                float drySample = buffer.getSample(ch, i);
+                float outputSample = drySample * (1.0f - eventCrossfade);
+
+                if (mixMode == 0) outputSample += wetSample * eventCrossfade; // Gate
+                if (mixMode == 1) outputSample = drySample * (1.0f - eventCrossfade) + wetSample * eventCrossfade; // Insert
+                if (mixMode == 2) outputSample = drySample + (wetSample - drySample) * 0.5f * eventCrossfade; // Mix
+                
                 buffer.setSample(ch, i, outputSample);
             }
             stutterPlayCounter = (stutterPlayCounter + 1) % loopLen;
             macroEnvelopeCounter++;
             if (autoStutterActive) --autoStutterRemainingSamples;
         }
+        else
+        {
+            for (int ch = 0; ch < totalNumOutputChannels; ++ch)
+            {
+                float drySample = buffer.getSample(ch, i);
+                buffer.setSample(ch, i, drySample * (1.0f - eventCrossfade));
+            }
+        }
 
         if (autoStutterActive && autoStutterRemainingSamples <= 0)
         {
             autoStutterActive = false;
             stutterLatched = false;
-            fadeSamplesRemaining = fadeLengthInSamples;
-        }
-        
-        if (!isStutteringEvent && crossfadeWet > 0.0f)
-        {
-             crossfadeWet -= 1.0f / fadeLengthInSamples;
-             if (crossfadeWet < 0.0f) crossfadeWet = 0.0f;
+            if (macroGateParam < 1.0f) 
+                postStutterSilence = fadeLengthInSamples;
         }
     }
     writePos = (writePos + numSamples) % maxStutterLenSamples;

@@ -72,7 +72,6 @@ public:
     int                       stutterLenSamples   = 0;       // length of the 1/64-note in samples
     int                       stutterPlayCounter  = 0;       // wraps 0…stutterLenSamples-1
     int                       stutterWritePos     = 0; // Tracks where to record in the stutterBuffer
-    int                       stutterSamplesWritten = 0; // total samples recorded into stutterBuffer
     double                    lastQuantizedBeat   = -1.0;  // used to detect new quantized beat
     bool                      autoStutterActive = false; // NEW: controls stutter playback without changing the GUI
     int                       autoStutterRemainingSamples = 0;
@@ -81,20 +80,18 @@ public:
     int                       manualStutterRateDenominator = -1;
     bool                      manualStutterTriggered = false;
 
-    // ==== Manual Crossfade ====
-    float crossfadeWet = 0.0f;
-    int fadeSamplesRemaining = 0;
+    // ==== New Fade & State Logic ====
+    float eventCrossfade = 0.0f;
     int fadeLengthInSamples = 0;
-    
+    bool stutterIsScheduled = false;
+    double lastDecisionBeat = -1.0;
+    int postStutterSilence = 0;
+
     // ==== Envelope variables ====
-    int nanoEnvelopeCounter = 0;
     int nanoEnvelopeLengthInSamples = 0;
     int macroEnvelopeCounter = 0;
     int macroEnvelopeLengthInSamples = 0;
-    float iirMacroGain = 0.0f;
-    float iirNanoGain = 0.0f;
     
-
     // Cached parameters for real-time-safe access
     std::array<float, 8> regularRateWeights {{ 0.0f }};
     std::array<float, 12> nanoRateWeights {{ 0.0f }};
@@ -121,8 +118,6 @@ public:
     void parameterChanged(const juce::String& parameterID, float newValue) override;
 
     void setManualStutterRate(int rate) { manualStutterRateDenominator = rate; }
-
-
 
 private:
     //==============================================================================
