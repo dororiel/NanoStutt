@@ -97,7 +97,13 @@ public:
     // Cached parameters for real-time-safe access
     std::array<float, 8> regularRateWeights {{ 0.0f }};
     std::array<float, 12> nanoRateWeights {{ 0.0f }};
+    std::array<float, 4> quantUnitWeights {{ 0.0f }};
     float nanoBlend = 0.0f;
+    
+    // Dynamic quantization
+    int currentQuantIndex = 1; // Default to 1/8 (index 1)
+    int nextQuantIndex = 1;
+    bool quantDecisionPending = false;
     
 
     // Ratio/denominator lookup

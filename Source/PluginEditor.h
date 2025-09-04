@@ -80,6 +80,10 @@ public:
     juce::OwnedArray<juce::Slider> rateProbSliders;
     juce::OwnedArray<juce::Label> rateProbLabels;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> rateProbAttachments;
+    
+    juce::OwnedArray<juce::Slider> quantProbSliders;
+    juce::OwnedArray<juce::Label> quantProbLabels;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> quantProbAttachments;
     juce::Label chanceLabel, quantLabel;
     juce::Label nanoGateLabel, nanoShapeLabel, nanoSmoothLabel;
     juce::Label macroGateLabel, macroShapeLabel, macroSmoothLabel;

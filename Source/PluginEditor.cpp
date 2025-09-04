@@ -108,6 +108,27 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
             audioProcessor.parameters, paramId, *slider));
     }
     
+    // === Quant Probability Sliders ===
+    auto quantLabels = juce::StringArray { "1/4", "1/8", "1/16", "1/32" };
+    for (int i = 0; i < quantLabels.size(); ++i)
+    {
+        auto* slider = new juce::Slider();
+        slider->setSliderStyle(juce::Slider::LinearVertical);
+        slider->setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        addAndMakeVisible(slider);
+        quantProbSliders.add(slider);
+
+        auto* label = new juce::Label();
+        label->setText(quantLabels[i], juce::dontSendNotification);
+        label->setJustificationType(juce::Justification::centred);
+        addAndMakeVisible(label);
+        quantProbLabels.add(label);
+
+        juce::String paramId = "quantProb_" + quantLabels[i];
+        quantProbAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            audioProcessor.parameters, paramId, *slider));
+    }
+    
     // === Labels for main knobs ===
     chanceLabel.setText("Chance", juce::dontSendNotification);
     chanceLabel.attachToComponent(&autoStutterChanceSlider, false);
@@ -327,11 +348,31 @@ void NanoStuttAudioProcessorEditor::resized()
     autoStutterChanceSlider.setBounds(controlPanelX, controlY, 110, 30);  // Larger slider
     controlY += 40;
 
-    quantLabel.setBounds(controlPanelX, controlY, 110, 20);
-    controlY += 40;
+    // === Quant Probability Sliders (larger, horizontal layout) ===
+    const int quantSliderWidth = 35;
+    const int quantSliderHeight = 80;
+    const int quantSpacing = 5;
+    const int numQuantSliders = quantProbSliders.size();
+    const int totalQuantWidth = numQuantSliders * (quantSliderWidth + quantSpacing) - quantSpacing;
+    const int quantStartX = controlPanelX + (120 - totalQuantWidth) / 2; // Center within expanded width
+    
+    for (int i = 0; i < numQuantSliders; ++i)
+    {
+        int sliderX = quantStartX + i * (quantSliderWidth + quantSpacing);
+        quantProbSliders[i]->setBounds(sliderX, controlY, quantSliderWidth, quantSliderHeight);
+        // Position labels below sliders
+        quantProbLabels[i]->setBounds(sliderX, controlY + quantSliderHeight + 2, quantSliderWidth, 15);
+    }
+    controlY += quantSliderHeight + 20;
 
-    autoStutterQuantMenu.setBounds(controlPanelX, controlY, 110, 24);
-    controlY += 40;
+    quantLabel.setText("Quant Probabilities", juce::dontSendNotification);
+    quantLabel.setBounds(controlPanelX, controlY, 110, 20);
+    controlY += 25;
+
+    // Hide the old static quantization menu since we now use dynamic probabilities
+    // autoStutterQuantMenu.setBounds(controlPanelX, controlY, 110, 24);
+    autoStutterQuantMenu.setVisible(false);
+    // controlY += 40;
 
     stutterButton.setBounds(controlPanelX, controlY, 110, 24);
     controlY += 40;

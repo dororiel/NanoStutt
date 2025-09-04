@@ -126,7 +126,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     auto& params = parameters;
     bool autoStutter  = params.getRawParameterValue("autoStutterEnabled")->load();
     float chance      = params.getRawParameterValue("autoStutterChance")->load();
-    int quantIndex    = (int) params.getRawParameterValue("autoStutterQuant")->load();
+    // Use dynamic quant index instead of static parameter
+    int quantIndex = currentQuantIndex;
     auto mixMode      = (int) params.getRawParameterValue("MixMode")->load();
 
     auto nanoGateParam = params.getRawParameterValue("NanoGate")->load();
@@ -174,6 +175,26 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             lastDecisionBeat = decisionBeat;
             if (autoStutter && juce::Random::getSystemRandom().nextFloat() < chance)
                 stutterIsScheduled = true;
+            
+            // --- Dynamic Quantization Selection ---
+            // Select next quantization unit using weighted probabilities
+            auto getWeightedQuantIndex = [](const std::array<float, 4>& weights) {
+                int idx = 1; // Default to 1/8 (index 1) if no weights
+                float total = std::accumulate(weights.begin(), weights.end(), 0.0f);
+                if (total > 0.0f) {
+                    float r = juce::Random::getSystemRandom().nextFloat() * total;
+                    float accum = 0.0f;
+                    for (int j = 0; j < (int)weights.size(); ++j) {
+                        accum += weights[j];
+                        if (r <= accum) { 
+                            idx = j; 
+                            break; 
+                        }
+                    }
+                }
+                return idx;
+            };
+            nextQuantIndex = getWeightedQuantIndex(quantUnitWeights);
         }
 
         // --- Beat boundary logic ---
@@ -183,7 +204,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         {
             lastQuantizedBeat = quantizedBeat;
             if (postStutterSilence > 0) postStutterSilence = 0;
-
+            
             if (stutterIsScheduled)
             {
                 autoStutterActive = true;
@@ -213,6 +234,13 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
                 autoStutterRemainingSamples = static_cast<int>(sampleRate * gateDurationSeconds);
                 stutterIsScheduled = false;
+                
+                // Now that the stutter event is processed, we can safely change quantization
+                if (currentQuantIndex != nextQuantIndex) {
+                    currentQuantIndex = nextQuantIndex;
+                    // Note: We don't recalculate quantUnit here since it would affect the current block
+                    // The new quantization will take effect in the next processing block
+                }
             }
         }
 
@@ -455,6 +483,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         "autoStutterQuant", "Auto Stutter Quantization",
         juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 1));
 
+    // Quant unit probability parameters
+    auto quantLabels = juce::StringArray { "1/4", "1/8", "1/16", "1/32" };
+    for (int i = 0; i < quantLabels.size(); ++i)
+    {
+        juce::String id = "quantProb_" + quantLabels[i];
+        float defaultValue = (quantLabels[i] == "1/8") ? 1.0f : 0.0f; // 1/8th at max, others at 0
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.0f, 1.0f, defaultValue));
+    }
+
     auto rateLabels = juce::StringArray { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
     for (const auto& label : rateLabels)
     {
@@ -493,6 +530,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
 void NanoStuttAudioProcessor::updateCachedParameters()
 {
     static const std::array<std::string, 8> regularLabels = { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    static const std::array<std::string, 4> quantLabels = { "1/4", "1/8", "1/16", "1/32" };
    
     for (size_t i = 0; i < regularLabels.size(); ++i)
         regularRateWeights[i] = parameters.getRawParameterValue("rateProb_" + regularLabels[i])->load();
@@ -500,15 +538,22 @@ void NanoStuttAudioProcessor::updateCachedParameters()
     for (int i = 0; i < 12; ++i)
         nanoRateWeights[i] = parameters.getRawParameterValue("nanoProb_" + std::to_string(i))->load();
 
+    for (size_t i = 0; i < quantLabels.size(); ++i)
+        quantUnitWeights[i] = parameters.getRawParameterValue("quantProb_" + quantLabels[i])->load();
+
     nanoBlend = parameters.getRawParameterValue("nanoBlend")->load();
 }
 
 void NanoStuttAudioProcessor::initializeParameterListeners()
 {
     static const std::array<std::string, 8> regularLabels = { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    static const std::array<std::string, 4> quantLabels = { "1/4", "1/8", "1/16", "1/32" };
 
     for (const auto& label : regularLabels)
         parameters.addParameterListener("rateProb_" + label, this);
+
+    for (const auto& label : quantLabels)
+        parameters.addParameterListener("quantProb_" + label, this);
 
     for (int i = 0; i < 12; ++i)
         parameters.addParameterListener("nanoProb_" + std::to_string(i), this);
