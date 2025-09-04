@@ -91,6 +91,7 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     maxStutterLenSamples = static_cast<int>(sampleRate * maxStutterSeconds);
     stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
     fadeLengthInSamples = static_cast<int>(sampleRate * 0.001); // 1ms fade
+    
 }
 
 void NanoStuttAudioProcessor::releaseResources()
@@ -147,9 +148,11 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     double ppqPerSample = (bpm / 60.0) / sampleRate;
     double quantUnit = 1.0 / std::pow(2.0, quantIndex);
 
-    stutterBuffer.copyFrom(0, writePos, buffer, 0, 0, numSamples);
-    if (totalNumOutputChannels > 1)
-        stutterBuffer.copyFrom(1, writePos, buffer, 1, 0, numSamples);
+    // True stereo buffer capture - preserve stereo separation
+    for (int ch = 0; ch < totalNumOutputChannels; ++ch) {
+        int sourceChannel = juce::jmin(ch, buffer.getNumChannels() - 1);
+        stutterBuffer.copyFrom(ch, writePos, buffer, sourceChannel, 0, numSamples);
+    }
     
     auto calculateGain = [](float progress, float shapeParam) {
         float mappedShape = (shapeParam - 0.5f) * 2.0f;
@@ -159,7 +162,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         return juce::jmap(curveAmount, 0.0f, 1.0f, 1.0f, curvedGain);
     };
 
-    const float fadeIncrement = (fadeLengthInSamples > 0) ? 1.0f / (float)fadeLengthInSamples : 1.0f;
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -224,27 +226,76 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             macroEnvelopeLengthInSamples = autoStutterActive ? autoStutterRemainingSamples : std::numeric_limits<int>::max();
         }
 
-        // --- Pre-emptive Crossfade Logic ---
+        // --- Sample-Accurate Fade Logic ---
         double nextBeatPpq = (quantizedBeat + 1.0) * quantUnit;
         int samplesToNextBeat = static_cast<int>((nextBeatPpq - currentPpq) / ppqPerSample);
-        float targetCrossfade = eventCrossfade;
-
-        bool needsFadeIn = (macroSmoothParam > 0.0f || macroShapeParam > 0.5f);
-        bool isEndingFullEvent = (autoStutterActive && autoStutterRemainingSamples <= samplesToNextBeat && macroGateParam >= 1.0f);
-
-        if (stutterIsScheduled && needsFadeIn && samplesToNextBeat < fadeLengthInSamples)
-            targetCrossfade = 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples;
-        else if (isEndingFullEvent && samplesToNextBeat < fadeLengthInSamples)
-            targetCrossfade = (float)samplesToNextBeat / (float)fadeLengthInSamples;
-        else if (isStutteringEvent || postStutterSilence > 0)
-            targetCrossfade = 1.0f;
-        else
-            targetCrossfade = 0.0f;
-
-        if (eventCrossfade < targetCrossfade)
-            eventCrossfade = std::min(targetCrossfade, eventCrossfade + fadeIncrement);
-        else if (eventCrossfade > targetCrossfade)
-            eventCrossfade = std::max(targetCrossfade, eventCrossfade - fadeIncrement);
+        
+        // Current state
+        bool currentlyStuttering = (stutterLatched && postStutterSilence <= 0);
+        
+        // Determine upcoming state transitions
+        bool stutterStarting = (stutterIsScheduled && samplesToNextBeat < fadeLengthInSamples);
+        bool stutterEnding = (autoStutterActive && autoStutterRemainingSamples <= samplesToNextBeat);
+        
+        // Calculate exact fade gains for sample-accurate control
+        float currentDryGain = 1.0f;   // Default: dry signal on
+        float currentWetGain = 0.0f;   // Default: wet signal off
+        
+        // Handle specific fade scenarios with exact sample timing FIRST
+        if (stutterStarting && samplesToNextBeat < fadeLengthInSamples) {
+            // Calculate fade progress (0.0 at start of fade, 1.0 at event start)
+            float fadeProgress = 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples;
+            
+            // Calculate the ACTUAL first sample gain including macro smooth effects
+            float firstSampleMacroGain = calculateGain(0.0f, macroShapeParam);
+            
+            // Apply macro smooth fade-in if active (mimics the logic in main processing)
+            float macroFadeLength = macroSmoothParam * 0.5f;
+            if (macroFadeLength > 0.0f) {
+                // First sample has macroProgress = 0, so macro smooth will zero the gain
+                firstSampleMacroGain = 0.0f;
+            }
+            
+            if (!wasStuttering) {
+                // Scenario 1: Dry -> Stutter pre-emptive fade
+                // Fade dry: 1.0 -> actualFirstSampleGain, wet stays 0
+                currentDryGain = 1.0f + (firstSampleMacroGain - 1.0f) * fadeProgress;
+                currentWetGain = 0.0f;
+            } else {
+                // Scenario 2: Stutter -> Stutter crossfade
+                // Current wet: 1.0 -> 0.0, dry: 0.0 -> actualFirstSampleGain
+                currentDryGain = firstSampleMacroGain * fadeProgress;
+                currentWetGain = 1.0f - fadeProgress;
+            }
+        } else if (stutterEnding && samplesToNextBeat < fadeLengthInSamples) {
+            // Scenario 3: Stutter -> Dry crossfade
+            float fadeProgress = 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples;
+            // Current wet: 1.0 -> 0.0, dry: 0.0 -> 1.0
+            currentDryGain = fadeProgress;
+            currentWetGain = 1.0f - fadeProgress;
+        } else {
+            // No fade active - apply state-based gain control
+            if (currentlyStuttering) {
+                currentDryGain = 0.0f;   // During stutter: dry off
+                currentWetGain = 1.0f;   // During stutter: wet on
+            }
+            // else: already set to defaults (dry on, wet off)
+        }
+        
+        // Scenario 4: Pre-gate-end wet fade out
+        if (currentlyStuttering && macroGateParam < 1.0f) {
+            float macroGateMultiplier = 0.25f + macroGateParam * 0.75f;
+            int effectiveMacroLength = static_cast<int>((float)macroEnvelopeLengthInSamples * macroGateMultiplier);
+            int samplesToGateEnd = effectiveMacroLength - macroEnvelopeCounter;
+            
+            if (samplesToGateEnd > 0 && samplesToGateEnd < fadeLengthInSamples) {
+                // Sample-accurate fade out before gate ends
+                float gateProgress = 1.0f - (float)samplesToGateEnd / (float)fadeLengthInSamples;
+                currentWetGain = 1.0f - gateProgress;
+            } else if (samplesToGateEnd <= 0) {
+                currentWetGain = 0.0f;
+            }
+        }
 
         // --- Main Processing ---
         if (stutterLatched)
@@ -289,11 +340,36 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 }
 
                 float drySample = buffer.getSample(ch, i);
-                float outputSample = drySample * (1.0f - eventCrossfade);
+                float outputSample = 0.0f;
 
-                if (mixMode == 0) outputSample += wetSample * eventCrossfade; // Gate
-                if (mixMode == 1) outputSample = drySample * (1.0f - eventCrossfade) + wetSample * eventCrossfade; // Insert
-                if (mixMode == 2) outputSample = drySample + (wetSample - drySample) * 0.5f * eventCrossfade; // Mix
+                // Apply sample-accurate fade gains to signals
+                float fadedDrySample = drySample * currentDryGain;
+                float fadedWetSample = wetSample * currentWetGain;
+
+                // Mix modes with correct behavior
+                if (mixMode == 0) {        // Gate mode - wet signal OR silence only (never dry)
+                    outputSample = fadedWetSample;
+                    
+                } else if (mixMode == 1) { // Insert mode - stutter replaces dry for full quantization duration
+                    bool inStutterQuantUnit = (autoStutterActive || stutterLatched || postStutterSilence > 0);
+                    
+                    if (inStutterQuantUnit) {
+                        // During stutter quantization: output faded wet + faded dry (for transitions)
+                        outputSample = fadedWetSample + fadedDrySample;
+                    } else {
+                        // Outside stutter quantization: output faded dry signal
+                        outputSample = fadedDrySample;
+                    }
+                    
+                } else if (mixMode == 2) { // Mix mode - 50/50 blend during stutter events, dry otherwise
+                    if (currentlyStuttering) {
+                        // During stutter events: 50/50 blend of faded signals
+                        outputSample = (fadedDrySample + fadedWetSample) * 0.5f;
+                    } else {
+                        // Outside stutter events: faded dry signal only
+                        outputSample = fadedDrySample;
+                    }
+                }
                 
                 buffer.setSample(ch, i, outputSample);
             }
@@ -306,7 +382,22 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             for (int ch = 0; ch < totalNumOutputChannels; ++ch)
             {
                 float drySample = buffer.getSample(ch, i);
-                buffer.setSample(ch, i, drySample * (1.0f - eventCrossfade));
+                float outputSample = 0.0f;
+
+                // Apply sample-accurate fade gains to signals
+                float fadedDrySample = drySample * currentDryGain;
+                float fadedWetSample = 0.0f * currentWetGain; // No wet sample when not stuttering
+
+                // Mix modes with correct behavior
+                if (mixMode == 0) {        // Gate mode - wet signal OR silence only
+                    outputSample = fadedWetSample; // Will be 0 when not stuttering
+                } else if (mixMode == 1) { // Insert mode
+                    outputSample = fadedDrySample;
+                } else if (mixMode == 2) { // Mix mode
+                    outputSample = fadedDrySample;
+                }
+                
+                buffer.setSample(ch, i, outputSample);
             }
         }
 
@@ -317,6 +408,9 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             if (macroGateParam < 1.0f) 
                 postStutterSilence = fadeLengthInSamples;
         }
+        
+        // Update state tracking for next sample
+        wasStuttering = currentlyStuttering;
     }
     writePos = (writePos + numSamples) % maxStutterLenSamples;
 }

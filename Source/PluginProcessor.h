@@ -81,11 +81,13 @@ public:
     bool                      manualStutterTriggered = false;
 
     // ==== New Fade & State Logic ====
-    float eventCrossfade = 0.0f;
     int fadeLengthInSamples = 0;
     bool stutterIsScheduled = false;
     double lastDecisionBeat = -1.0;
     int postStutterSilence = 0;
+    
+    // State tracking for fade logic
+    bool wasStuttering = false;
 
     // ==== Envelope variables ====
     int nanoEnvelopeLengthInSamples = 0;
