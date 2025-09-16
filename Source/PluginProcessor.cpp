@@ -123,19 +123,72 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     auto numSamples             = buffer.getNumSamples();
     auto sampleRate             = getSampleRate();
 
+    // Check if host transport is playing - only process stuttering when transport is running
+    auto playHead = getPlayHead();
+    if (playHead == nullptr) {
+        // No playhead info available, pass through dry audio
+        return;
+    }
+
+    auto position = playHead->getPosition();
+    bool isPlaying = position && position->getIsPlaying();
+    double currentPpqPosition = position ? position->getPpqPosition().orFallback(0.0) : 0.0;
+
+    // Get parameters early for transport reset logic
     auto& params = parameters;
+    float chance = params.getRawParameterValue("autoStutterChance")->load();
+
+    // TRANSPORT STATE DETECTION AND QUANTIZATION RESET
+    if (!isPlaying) {
+        // Transport is not playing, pass through dry audio and reset stutter state
+        autoStutterActive = false;
+        parametersHeld = false;
+        wasPlaying = false;
+        writePos = 0;
+        return;
+    }
+
+    // Check for transport restart or position jump
+    bool transportJustStarted = !wasPlaying && isPlaying;
+    bool positionJumped = wasPlaying && std::abs(currentPpqPosition - lastPpqPosition) > 0.125; // Allow small timing variations
+
+    if (transportJustStarted || positionJumped) {
+        // Reset quantization alignment based on new PPQ position
+        // PPQ / 0.125 = number of 1/32nd notes from song start
+        double thirtySecondNotes = currentPpqPosition / 0.125;
+        bool isEven = (static_cast<int>(std::round(thirtySecondNotes)) % 2) == 0;
+        quantCount = isEven ? 1 : 0;
+
+        // Reset all stutter and timing variables
+        autoStutterActive = false;
+        stutterIsScheduled = false;
+        autoStutterRemainingSamples = 0;
+        postStutterSilence = 0;
+        parametersHeld = false;
+        macroEnvelopeCounter = 1;
+        writePos = 0;
+
+        if (chance >= 0.99f) {
+            DBG("*** TRANSPORT RESET *** PPQ=" + juce::String(currentPpqPosition)
+                + ", 32nds=" + juce::String(thirtySecondNotes) + ", quantCount=" + juce::String(quantCount)
+                + ", jumped=" + juce::String((int)positionJumped) + ", started=" + juce::String((int)transportJustStarted));
+        }
+    }
+
+    // Update transport state tracking
+    wasPlaying = isPlaying;
+    lastPpqPosition = currentPpqPosition;
+
     bool autoStutter  = params.getRawParameterValue("autoStutterEnabled")->load();
-    float chance      = params.getRawParameterValue("autoStutterChance")->load();
-    // Use dynamic quant index instead of static parameter
-    int quantIndex = currentQuantIndex;
     auto mixMode      = (int) params.getRawParameterValue("MixMode")->load();
 
     auto nanoGateParam = params.getRawParameterValue("NanoGate")->load();
     auto nanoShapeParam = params.getRawParameterValue("NanoShape")->load();
     auto nanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
-    auto macroGateParam = params.getRawParameterValue("MacroGate")->load();
-    auto macroShapeParam = params.getRawParameterValue("MacroShape")->load();
-    auto macroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
+    // Macro envelope parameters now handled via sample-and-hold mechanism
+    // auto macroGateParam = params.getRawParameterValue("MacroGate")->load();
+    // auto macroShapeParam = params.getRawParameterValue("MacroShape")->load();
+    // auto macroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
 
     double ppqAtStartOfBlock = 0.0;
     double bpm = 120.0;
@@ -147,12 +200,32 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         }
 
     double ppqPerSample = (bpm / 60.0) / sampleRate;
-    double quantUnit = 1.0 / std::pow(2.0, quantIndex);
+    double quantUnit = 1.0 / std::pow(2.0, currentQuantIndex);
 
-    // True stereo buffer capture - preserve stereo separation
-    for (int ch = 0; ch < totalNumOutputChannels; ++ch) {
-        int sourceChannel = juce::jmin(ch, buffer.getNumChannels() - 1);
-        stutterBuffer.copyFrom(ch, writePos, buffer, sourceChannel, 0, numSamples);
+    // True stereo buffer capture - preserve stereo separation with circular buffer handling
+    if (maxStutterLenSamples > 0 && numSamples > 0) {
+        for (int ch = 0; ch < totalNumOutputChannels && ch < stutterBuffer.getNumChannels(); ++ch) {
+            int sourceChannel = juce::jmin(ch, buffer.getNumChannels() - 1);
+
+            if (writePos + numSamples <= maxStutterLenSamples) {
+                // Simple case: no wraparound needed
+                stutterBuffer.copyFrom(ch, writePos, buffer, sourceChannel, 0, numSamples);
+            } else {
+                // Wraparound case: split the copy into two parts
+                int firstPartSize = maxStutterLenSamples - writePos;
+                int secondPartSize = numSamples - firstPartSize;
+
+                if (firstPartSize > 0) {
+                    // Copy first part (to end of buffer)
+                    stutterBuffer.copyFrom(ch, writePos, buffer, sourceChannel, 0, firstPartSize);
+                }
+
+                if (secondPartSize > 0) {
+                    // Copy second part (from start of buffer)
+                    stutterBuffer.copyFrom(ch, 0, buffer, sourceChannel, firstPartSize, secondPartSize);
+                }
+            }
+        }
     }
     
     auto calculateGain = [](float progress, float shapeParam) {
@@ -164,281 +237,593 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     };
 
 
+    // =================================================================================
+    // MAIN PROCESSING LOOP - THREE DECISION POINT ARCHITECTURE
+    //
+    // Decision Point 1: START OF STUTTER EVENT (at beat boundaries)
+    //   - Decide nano vs rhythmical system
+    //   - Select rate from chosen system
+    //   - Update engagement flags and quantization
+    //   - Schedule next event and quantization unit
+    //
+    // Decision Point 2: PARAMETER SAMPLING (2ms before event end)
+    //   - Sample macro envelope controls for NEXT stutter event
+    //
+    // Decision Point 3: FADE CONTROL (1ms before event boundaries)
+    //   - Calculate wet/dry crossfading gains
+    //   - Handle transitions between stutter and dry states
+    // =================================================================================
+
     for (int i = 0; i < numSamples; ++i)
     {
         double currentPpq = ppqAtStartOfBlock + (i * ppqPerSample);
 
-        // --- Mid-point decision logic ---
-        double decisionBeat = std::floor(currentPpq / quantUnit + 0.5);
-        if (decisionBeat != lastDecisionBeat)
-        {
-            lastDecisionBeat = decisionBeat;
-            if (autoStutter && juce::Random::getSystemRandom().nextFloat() < chance)
-                stutterIsScheduled = true;
-            
-            // --- Dynamic Quantization Selection ---
-            // Select next quantization unit using weighted probabilities
-            auto getWeightedQuantIndex = [](const std::array<float, 4>& weights) {
-                int idx = 1; // Default to 1/8 (index 1) if no weights
-                float total = std::accumulate(weights.begin(), weights.end(), 0.0f);
-                if (total > 0.0f) {
-                    float r = juce::Random::getSystemRandom().nextFloat() * total;
-                    float accum = 0.0f;
-                    for (int j = 0; j < (int)weights.size(); ++j) {
-                        accum += weights[j];
-                        if (r <= accum) { 
-                            idx = j; 
-                            break; 
-                        }
-                    }
-                }
-                return idx;
-            };
-            nextQuantIndex = getWeightedQuantIndex(quantUnitWeights);
-        }
+        // Fixed quantization logic: 1/32nd static beat detection
+        double staticQuantUnit = 0.125; // 1/32nd note
+        int quantToNewBeat = static_cast<int>(quantUnit / staticQuantUnit); // How many 1/32nds in chosen quant
+        quantToNewBeat = std::max(1, quantToNewBeat); // Ensure at least 1
 
-        // --- Beat boundary logic ---
-        double quantizedBeat = std::floor(currentPpq / quantUnit);
-        bool isNewBeat = (quantizedBeat != lastQuantizedBeat);
-        if (isNewBeat)
-        {
-            lastQuantizedBeat = quantizedBeat;
-            if (postStutterSilence > 0) postStutterSilence = 0;
-            
-            if (stutterIsScheduled)
-            {
-                autoStutterActive = true;
-                stutterLatched = false; 
-                secondsPerWholeNote = 240.0 / bpm;
-                bool useNano = juce::Random::getSystemRandom().nextFloat() < nanoBlend;
-                auto getWeightedIndex = [](const auto& weights) {
-                    int idx = 0; float total = std::accumulate(weights.begin(), weights.end(), 0.0f);
-                    if (total > 0.0f) {
-                        float r = juce::Random::getSystemRandom().nextFloat() * total; float accum = 0.0f;
-                        for (int j = 0; j < (int)weights.size(); ++j) {
-                            accum += weights[j]; if (r <= accum) { idx = j; break; }
-                        }
-                    } return idx;
-                };
-                int selectedIndex = useNano ? getWeightedIndex(nanoRateWeights) : getWeightedIndex(regularRateWeights);
-                if (useNano) {
-                    double currentNanoTune = params.getRawParameterValue("nanoTune")->load();
-                    double nanoBase = ((60.0 / bpm) / 16.0) / currentNanoTune;
-                    double sliceDuration = nanoBase / params.getRawParameterValue("nanoRatio_" + std::to_string(selectedIndex))->load();
-                    chosenDenominator = 240.0 / (bpm * sliceDuration);
-                } else {
-                    chosenDenominator = regularDenominators[selectedIndex];
-                }
-                float gateScale = params.getRawParameterValue("autoStutterGate")->load();
-                double quantDurationSeconds = (240.0 / bpm) * (1.0 / std::pow(2.0, quantIndex + 2));
-                double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
-                autoStutterRemainingSamples = static_cast<int>(sampleRate * gateDurationSeconds);
-                stutterIsScheduled = false;
-                
-                // Now that the stutter event is processed, we can safely change quantization
-                if (currentQuantIndex != nextQuantIndex) {
-                    currentQuantIndex = nextQuantIndex;
-                    // Note: We don't recalculate quantUnit here since it would affect the current block
-                    // The new quantization will take effect in the next processing block
-                }
-            }
-        }
-
-        bool isStutteringEvent = autoStutterActive || *params.getRawParameterValue("stutterOn");
-        if (isStutteringEvent && !stutterLatched)
-        {
-            stutterPlayCounter = 0;
-            stutterWritePos = (writePos + i) % maxStutterLenSamples;
-            stutterLatched = true;
-            macroEnvelopeCounter = 0;
-            macroEnvelopeLengthInSamples = autoStutterActive ? autoStutterRemainingSamples : std::numeric_limits<int>::max();
-        }
-
-        // --- Sample-Accurate Fade Logic ---
-        double nextBeatPpq = (quantizedBeat + 1.0) * quantUnit;
+        // Calculate timing for all decision points
+        double quantizedBeat = std::floor(currentPpq / staticQuantUnit);
+        double nextBeatPpq = (quantizedBeat + 1.0) * staticQuantUnit;
         int samplesToNextBeat = static_cast<int>((nextBeatPpq - currentPpq) / ppqPerSample);
+        bool isNewBeat = (quantizedBeat != lastQuantizedBeat);
+       
         
-        // Current state
-        bool currentlyStuttering = (stutterLatched && postStutterSilence <= 0);
-        
-        // Determine upcoming state transitions
-        bool stutterStarting = (stutterIsScheduled && samplesToNextBeat < fadeLengthInSamples);
-        bool stutterEnding = (autoStutterActive && autoStutterRemainingSamples <= samplesToNextBeat);
-        
-        // Calculate exact fade gains for sample-accurate control
-        float currentDryGain = 1.0f;   // Default: dry signal on
-        float currentWetGain = 0.0f;   // Default: wet signal off
-        
-        // Handle specific fade scenarios with exact sample timing FIRST
-        if (stutterStarting && samplesToNextBeat < fadeLengthInSamples) {
-            // Calculate fade progress (0.0 at start of fade, 1.0 at event start)
-            float fadeProgress = 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples;
-            
-            // Calculate the ACTUAL first sample gain including macro smooth effects
-            float firstSampleMacroGain = calculateGain(0.0f, macroShapeParam);
-            
-            // Apply macro smooth fade-in if active (mimics the logic in main processing)
-            float macroFadeLength = macroSmoothParam * 0.5f;
-            if (macroFadeLength > 0.0f) {
-                // First sample has macroProgress = 0, so macro smooth will zero the gain
-                firstSampleMacroGain = 0.0f;
-            }
-            
-            if (!wasStuttering) {
-                // Scenario 1: Dry -> Stutter pre-emptive fade
-                // Fade dry: 1.0 -> actualFirstSampleGain, wet stays 0
-                currentDryGain = 1.0f + (firstSampleMacroGain - 1.0f) * fadeProgress;
-                currentWetGain = 0.0f;
-            } else {
-                // Scenario 2: Stutter -> Stutter crossfade
-                // Current wet: 1.0 -> 0.0, dry: 0.0 -> actualFirstSampleGain
-                currentDryGain = firstSampleMacroGain * fadeProgress;
-                currentWetGain = 1.0f - fadeProgress;
-            }
-        } else if (stutterEnding && samplesToNextBeat < fadeLengthInSamples) {
-            // Scenario 3: Stutter -> Dry crossfade
-            float fadeProgress = 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples;
-            // Current wet: 1.0 -> 0.0, dry: 0.0 -> 1.0
-            currentDryGain = fadeProgress;
-            currentWetGain = 1.0f - fadeProgress;
-        } else {
-            // No fade active - apply state-based gain control
-            if (currentlyStuttering) {
-                currentDryGain = 0.0f;   // During stutter: dry off
-                currentWetGain = 1.0f;   // During stutter: wet on
-            }
-            // else: already set to defaults (dry on, wet off)
-        }
-        
-        // Scenario 4: Pre-gate-end wet fade out
-        if (currentlyStuttering && macroGateParam < 1.0f) {
-            float macroGateMultiplier = 0.25f + macroGateParam * 0.75f;
-            int effectiveMacroLength = static_cast<int>((float)macroEnvelopeLengthInSamples * macroGateMultiplier);
-            int samplesToGateEnd = effectiveMacroLength - macroEnvelopeCounter;
-            
-            if (samplesToGateEnd > 0 && samplesToGateEnd < fadeLengthInSamples) {
-                // Sample-accurate fade out before gate ends
-                float gateProgress = 1.0f - (float)samplesToGateEnd / (float)fadeLengthInSamples;
-                currentWetGain = 1.0f - gateProgress;
-            } else if (samplesToGateEnd <= 0) {
-                currentWetGain = 0.0f;
-            }
-        }
+        // =============================================================================
+        // STUTTER COMPLETION CHECK (must happen before Decision Point 1)
+        // Handle stutter event completion and state reset BEFORE starting new events
+        // =============================================================================
 
-        // --- Main Processing ---
-        if (stutterLatched)
-        {
-            int loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate), 1, maxStutterLenSamples);
-            int readIndex = (stutterWritePos + stutterPlayCounter) % maxStutterLenSamples;
-            int loopPos = stutterPlayCounter % loopLen;
+        // Debug stutter completion check - COMMENTED OUT
+        // static int completionCheckCounter = 0;
+        // if (completionCheckCounter++ % 5000 == 0 && autoStutterActive) {
+        //     DBG("STUTTER COMPLETION CHECK:");
+        //     DBG("  autoStutterActive=" + juce::String((int)autoStutterActive) + ", autoStutterRemainingSamples=" + juce::String(autoStutterRemainingSamples));
+        //     DBG("  Completion condition=" + juce::String((int)(autoStutterActive && autoStutterRemainingSamples <= 0)));
+        // }
 
-            float nanoGateMultiplier = 0.25f + nanoGateParam * 0.75f;
-            nanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
-            float macroGateMultiplier = 0.25f + macroGateParam * 0.75f;
-            int effectiveMacroLength = static_cast<int>((float)macroEnvelopeLengthInSamples * macroGateMultiplier);
-
-            float macroProgress = (float)macroEnvelopeCounter / (float)effectiveMacroLength;
-            float macroGain = (macroEnvelopeCounter < effectiveMacroLength) ? calculateGain(macroProgress, macroShapeParam) : 0.0f;
-            
-            float macroFadeLength = macroSmoothParam * 0.5f;
-            if (macroProgress < macroFadeLength && macroFadeLength > 0.0f) macroGain *= macroProgress / macroFadeLength;
-            else if (macroProgress > (1.0f - macroFadeLength) && macroFadeLength > 0.0f) macroGain *= (1.0f - macroProgress) / macroFadeLength;
-
-            float nanoProgress = (float)loopPos / (float)nanoEnvelopeLengthInSamples;
-            float nanoGain = (loopPos < nanoEnvelopeLengthInSamples) ? calculateGain(nanoProgress, nanoShapeParam) : 0.0f;
-
-            float wetGain = 1.0f;
-            if (autoStutterActive && autoStutterRemainingSamples <= fadeLengthInSamples)
-                wetGain = (float)autoStutterRemainingSamples / (float)fadeLengthInSamples;
-            if (postStutterSilence > 0) wetGain = 0.0f;
-
-            float finalGain = macroGain * nanoGain * wetGain;
-
-            for (int ch = 0; ch < totalNumOutputChannels; ++ch)
-            {
-                float wetSample = stutterBuffer.getSample(ch, readIndex) * finalGain;
-
-                int nanoFadeLen = static_cast<int>((float)loopLen * nanoSmoothParam * 0.5f);
-                if (nanoFadeLen > 1 && loopPos >= loopLen - nanoFadeLen)
-                {
-                    int startOfLoopReadIndex = (stutterWritePos + stutterPlayCounter - loopPos) % maxStutterLenSamples;
-                    float incomingSample = stutterBuffer.getSample(ch, startOfLoopReadIndex) * finalGain;
-                    float fadeProgress = (float)(loopPos - (loopLen - nanoFadeLen)) / (float)nanoFadeLen;
-                    wetSample = wetSample * (1.0f - fadeProgress) + incomingSample * fadeProgress;
-                }
-
-                float drySample = buffer.getSample(ch, i);
-                float outputSample = 0.0f;
-
-                // Apply sample-accurate fade gains to signals
-                float fadedDrySample = drySample * currentDryGain;
-                float fadedWetSample = wetSample * currentWetGain;
-
-                // Mix modes with correct behavior
-                if (mixMode == 0) {        // Gate mode - wet signal OR silence only (never dry)
-                    outputSample = fadedWetSample;
-                    
-                } else if (mixMode == 1) { // Insert mode - stutter replaces dry for full quantization duration
-                    bool inStutterQuantUnit = (autoStutterActive || stutterLatched || postStutterSilence > 0);
-                    
-                    if (inStutterQuantUnit) {
-                        // During stutter quantization: output faded wet + faded dry (for transitions)
-                        outputSample = fadedWetSample + fadedDrySample;
-                    } else {
-                        // Outside stutter quantization: output faded dry signal
-                        outputSample = fadedDrySample;
-                    }
-                    
-                } else if (mixMode == 2) { // Mix mode - 50/50 blend during stutter events, dry otherwise
-                    if (currentlyStuttering) {
-                        // During stutter events: 50/50 blend of faded signals
-                        outputSample = (fadedDrySample + fadedWetSample) * 0.5f;
-                    } else {
-                        // Outside stutter events: faded dry signal only
-                        outputSample = fadedDrySample;
-                    }
-                }
-                
-                buffer.setSample(ch, i, outputSample);
-            }
-            stutterPlayCounter = (stutterPlayCounter + 1) % loopLen;
-            macroEnvelopeCounter++;
-            if (autoStutterActive) --autoStutterRemainingSamples;
-        }
-        else
-        {
-            for (int ch = 0; ch < totalNumOutputChannels; ++ch)
-            {
-                float drySample = buffer.getSample(ch, i);
-                float outputSample = 0.0f;
-
-                // Apply sample-accurate fade gains to signals
-                float fadedDrySample = drySample * currentDryGain;
-                float fadedWetSample = 0.0f * currentWetGain; // No wet sample when not stuttering
-
-                // Mix modes with correct behavior
-                if (mixMode == 0) {        // Gate mode - wet signal OR silence only
-                    outputSample = fadedWetSample; // Will be 0 when not stuttering
-                } else if (mixMode == 1) { // Insert mode
-                    outputSample = fadedDrySample;
-                } else if (mixMode == 2) { // Mix mode
-                    outputSample = fadedDrySample;
-                }
-                
-                buffer.setSample(ch, i, outputSample);
-            }
-        }
-
+        // End stutter event when duration expires (SIMPLIFIED: only auto-stutter)
         if (autoStutterActive && autoStutterRemainingSamples <= 0)
         {
+            if (chance >= 0.99f) {
+                DBG("*** STUTTER ENDING *** stutterIsScheduled=" + juce::String((int)stutterIsScheduled));
+            }
+
             autoStutterActive = false;
-            stutterLatched = false;
-            if (macroGateParam < 1.0f) 
+            parametersHeld = false; // Reset for next event
+
+            // Add post-stutter silence if macro gate < 1.0
+            if (heldMacroGateParam < 1.0f) {
                 postStutterSilence = fadeLengthInSamples;
+                // DBG("Adding post-stutter silence: " + juce::String(postStutterSilence) + " samples");
+            }
         }
-        
-        // Update state tracking for next sample
-        wasStuttering = currentlyStuttering;
+
+
+        // =============================================================================
+        // DECISION POINT 1: START OF STUTTER EVENT
+        // At the start of a stutter event:
+        // - Decide if nano or rhythmical system will be used
+        // - Select which rate from the chosen system
+        // - Update stutter engagement flag and current quant unit
+        // - Use held envelope values from Decision Point 2
+        // - Decide next event scheduling and quantization
+        // =============================================================================
+        if (isNewBeat)
+        {
+            ++quantCount;
+            lastQuantizedBeat = quantizedBeat;
+
+            // Debug quantization counting - COMMENTED OUT
+            // if ((quantCount % 4) == 1) { // Every 4th 1/32nd (roughly every 1/8th)
+            //     DBG("QUANTIZATION DEBUG: quantCount=" + juce::String(quantCount) + ", quantToNewBeat=" + juce::String(quantToNewBeat)
+            //         + ", quantUnit=" + juce::String(quantUnit) + ", staticQuantUnit=" + juce::String(staticQuantUnit)
+            //         + ", approachingBoundary=" + juce::String((int)(quantCount >= quantToNewBeat - 1)));
+            // }
+
+            if (quantCount >= quantToNewBeat){
+                if (postStutterSilence > 0) postStutterSilence = 0;
+                
+                // Update quantization from previous decision
+                if (currentQuantIndex != nextQuantIndex) {
+                    currentQuantIndex = nextQuantIndex;
+                    quantUnit = 1.0 / std::pow(2.0, currentQuantIndex);
+                }
+                
+                // Calculate stutter event duration for this quantization unit
+                float gateScale = params.getRawParameterValue("autoStutterGate")->load();
+                double quantDurationSeconds = (240.0 / bpm) * quantUnit;
+                double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
+                stutterEventLengthSamples = static_cast<int>(sampleRate * gateDurationSeconds);
+                
+                // ACTIVATE SCHEDULED STUTTER EVENT
+                if (stutterIsScheduled)
+                {
+                    if (chance >= 0.99f) {
+                        DBG("*** STUTTER STARTING *** quantCount=" + juce::String(quantCount) + "/" + juce::String(quantToNewBeat));
+                    }
+
+                    // Engage stutter with rate system selection
+                    autoStutterActive = true;
+                    secondsPerWholeNote = 240.0 / bpm;
+                    
+                    // DECISION: Nano vs Rhythmical system selection
+                    bool useNano = juce::Random::getSystemRandom().nextFloat() < nanoBlend;
+                    int selectedIndex = useNano ? selectWeightedIndex(nanoRateWeights, 0) : selectWeightedIndex(regularRateWeights, 0);
+                    
+                    // DECISION: Rate selection from chosen system
+                    if (useNano) {
+                        double currentNanoTune = params.getRawParameterValue("nanoTune")->load();
+                        double nanoBase = ((60.0 / bpm) / 16.0) / currentNanoTune;
+                        double sliceDuration = nanoBase / params.getRawParameterValue("nanoRatio_" + std::to_string(selectedIndex))->load();
+                        chosenDenominator = 240.0 / (bpm * sliceDuration);
+                    } else {
+                        chosenDenominator = regularDenominators[selectedIndex];
+                    }
+                    
+                    autoStutterRemainingSamples = stutterEventLengthSamples;
+                    stutterIsScheduled = false;
+
+                    // RESET MACRO ENVELOPE for each new stutter event (including continuous stuttering)
+                    macroEnvelopeCounter = 1; // Start at 1 to avoid zero-progress spikes
+
+                    // Update macro envelope duration for this quantization unit
+                    double quantDurationSeconds = (60.0 / bpm) * quantUnit;
+                    int quantUnitLengthSamples = static_cast<int>(sampleRate * quantDurationSeconds);
+                    macroEnvelopeLengthInSamples = quantUnitLengthSamples;
+
+                    // CAPTURE FRESH AUDIO for each new stutter event (including continuous stuttering)
+                    stutterPlayCounter = 0;
+                    stutterWritePos = (writePos+i) % maxStutterLenSamples;
+
+                    if (chance >= 0.99f) {
+                        DBG("*** MACRO ENVELOPE RESET *** Counter=1, Length=" + juce::String(macroEnvelopeLengthInSamples));
+                        DBG("*** BUFFER CAPTURE RESET *** WritePos=" + juce::String(writePos) + ", StutterWritePos=" + juce::String(stutterWritePos));
+                    }
+                    
+                    // DBG("DECISION POINT 1: Stutter activated - System: " + juce::String(useNano ? "Nano" : "Rhythmical")
+                    //     + ", Rate: " + juce::String(chosenDenominator) + ", Duration: " + juce::String(stutterEventLengthSamples));
+                }
+                else autoStutterActive = false;
+                
+                // SCHEDULE NEXT STUTTER EVENT
+                float randomValue = juce::Random::getSystemRandom().nextFloat();
+                if (autoStutter && randomValue < chance) {
+                    stutterIsScheduled = true;
+                    if (chance >= 0.99f) {
+                        DBG("*** NEXT STUTTER SCHEDULED *** random=" + juce::String(randomValue));
+                    }
+                } else {
+                    stutterIsScheduled = false; // Explicitly set to false when not scheduling
+                    if (chance >= 0.99f) {
+                        DBG("*** NO STUTTER SCHEDULED *** random=" + juce::String(randomValue) + " >= chance=" + juce::String(chance));
+                    }
+                }
+                
+                // DECIDE NEXT QUANTIZATION UNIT for future events
+                nextQuantIndex = selectWeightedIndex(quantUnitWeights, 1); // Default to 1/8
+                
+                quantCount = 0;
+            }
+                
+        }
+ 
+        // =============================================================================
+        // DECISION POINT 2: PARAMETER SAMPLING (2ms before stutter event BEGINS)
+        // Sample macro envelope controls 2ms before ANY stutter event starts
+        // This ensures the next stutter event uses fresh parameter values
+        // =============================================================================
+        int twoMsInSamples = static_cast<int>(sampleRate * 0.002); // 2ms
+        static bool parametersSampledForUpcomingEvent = false; // Prevent multiple sampling for same upcoming event
+
+        // Check if a stutter event will start soon (using corrected quantization boundary logic)
+        bool stutterStartingSoon = (stutterIsScheduled && quantCount >= std::max(1, quantToNewBeat - 1) && samplesToNextBeat <= twoMsInSamples);
+
+        if (stutterStartingSoon) {
+            if (!parametersSampledForUpcomingEvent) {
+                // Sample parameters for the upcoming stutter event
+                heldMacroGateParam = params.getRawParameterValue("MacroGate")->load();
+                heldMacroShapeParam = params.getRawParameterValue("MacroShape")->load();
+                heldMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
+                parametersHeld = true;
+                parametersSampledForUpcomingEvent = true; // Prevent re-sampling for same event
+
+                // DBG("DECISION POINT 2: Parameters sampled 2ms before stutter starts (SamplesToStart: " + juce::String(samplesToNextBeat) + ") - Gate: " + juce::String(heldMacroGateParam)
+                //     + ", Shape=" + juce::String(heldMacroShapeParam) + ", Smooth=" + juce::String(heldMacroSmoothParam));
+            }
+        } else {
+            // Reset flag when not approaching a stutter event
+            parametersSampledForUpcomingEvent = false;
+        }
+
+        // INITIALIZE STUTTER EVENT when triggered (SIMPLIFIED: auto-stutter only)
+        // bool isStutteringEvent = autoStutterActive || *params.getRawParameterValue("stutterOn"); // MANUAL STUTTER DISABLED
+        static bool stutterInitialized = false;
+
+        // Reset initialization flag when not active
+        if (!autoStutterActive) {
+            stutterInitialized = false;
+        }
+
+        if (autoStutterActive && !stutterInitialized)
+        {
+            // Initialize stutter playback state (only for first-time initialization)
+            stutterInitialized = true;
+
+            // Note: stutterPlayCounter, stutterWritePos, and macroEnvelopeCounter are set when each stutter event activates
+
+            // No need for universal countdown - using autoStutterRemainingSamples only
+
+            // ENSURE PARAMETERS ARE HELD - if not already sampled, sample them now
+            if (!parametersHeld) {
+                heldMacroGateParam = params.getRawParameterValue("MacroGate")->load();
+                heldMacroShapeParam = params.getRawParameterValue("MacroShape")->load();
+                heldMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
+                parametersHeld = true;
+                DBG("Parameters sampled at stutter start: Gate=" + juce::String(heldMacroGateParam));
+            }
+
+            DBG("Stutter initialized - Using held parameters: Gate=" + juce::String(heldMacroGateParam)
+                + ", Shape=" + juce::String(heldMacroShapeParam) + ", Smooth=" + juce::String(heldMacroSmoothParam));
+        }
+
+        // =============================================================================
+        // DECISION POINT 3: FADE CONTROL (1ms before event boundaries)
+        // Control wet/dry crossfading based on upcoming state transitions:
+        // - If next stutter scheduled: wet fades to 0, dry fades to next event gain
+        // - If no next stutter: wet fades to 0, dry fades to 1.0
+        // =============================================================================
+
+        // SIMPLIFIED: Use only autoStutterActive - eliminate currentlyStuttering race condition
+        // Fixed: Only fade when approaching actual stutter boundaries, not every 1/32nd
+        bool approachingQuantBoundary = (quantCount >= std::max(1, quantToNewBeat - 1) && samplesToNextBeat <= fadeLengthInSamples);
+        bool stutterStarting = (stutterIsScheduled && approachingQuantBoundary);
+        bool stutterEnding = (autoStutterActive && autoStutterRemainingSamples <= fadeLengthInSamples);
+        bool stutterEndingToGap = (stutterEnding && !stutterIsScheduled); // Only fade to dry when NO next stutter scheduled
+
+        // Debug stutter state calculation - COMMENTED OUT
+        // static int stutterStateDebugCounter = 0;
+        // if (mixMode == 1 && (stutterStateDebugCounter++ % 3000) == 0) {
+        //     DBG("STUTTER STATE DEBUG (SIMPLIFIED):");
+        //     DBG("  autoStutterActive=" + juce::String((int)autoStutterActive) + ", postStutterSilence=" + juce::String(postStutterSilence));
+        //     DBG("  autoStutterRemainingSamples=" + juce::String(autoStutterRemainingSamples));
+        //     DBG("  quantCount=" + juce::String(quantCount) + ", quantToNewBeat=" + juce::String(quantToNewBeat));
+        //     DBG("  stutterStarting=" + juce::String((int)stutterStarting) + ", stutterEnding=" + juce::String((int)stutterEnding));
+        //     DBG("  stutterIsScheduled=" + juce::String((int)stutterIsScheduled) + ", chance=" + juce::String(chance));
+        // }
+
+        // =============================================================================
+        // 100% CHANCE TEST DEBUG - Only when chance >= 0.99
+        // =============================================================================
+        static int testDebugCounter = 0;
+        if (chance >= 0.99f && (testDebugCounter++ % 1000) == 0) {
+            DBG("=== 100% CHANCE TEST DEBUG ===");
+            DBG("STATES: autoStutterActive=" + juce::String((int)autoStutterActive) + ", stutterIsScheduled=" + juce::String((int)stutterIsScheduled));
+            DBG("TIMING: autoStutterRemainingSamples=" + juce::String(autoStutterRemainingSamples) + ", quantCount=" + juce::String(quantCount) + "/" + juce::String(quantToNewBeat));
+            DBG("FADES: stutterStarting=" + juce::String((int)stutterStarting) + ", stutterEnding=" + juce::String((int)stutterEnding));
+        }
+
+        // Default gain states
+        float currentDryGain = 1.0f;   // Dry signal on by default
+
+        // Gap period detection and debug - trigger immediately when gap period starts
+        static bool wasInGapPeriod = false;
+        bool inGapPeriod = (autoStutter && chance > 0.0f && !(autoStutterActive && postStutterSilence <= 0) && !stutterStarting && !stutterEndingToGap);
+
+        // Debug when entering gap period (every non-stutter event when autostutter is enabled)
+        if (mixMode == 1 && inGapPeriod && !wasInGapPeriod) {
+            DBG("GAP PERIOD DEBUG (entering gap period after non-stutter event):");
+            DBG("  chance=" + juce::String(chance) + ", stutterIsScheduled=" + juce::String((int)stutterIsScheduled));
+            DBG("  autoStutterActive=" + juce::String((int)autoStutterActive) + ", stutterLatched=" + juce::String((int)stutterLatched));
+            DBG("  postStutterSilence=" + juce::String(postStutterSilence));
+            DBG("  DryGain=" + juce::String(currentDryGain));
+        }
+
+        // Periodic debug during sustained gap periods
+        static int debugCounter = 0;
+        if (mixMode == 1 && inGapPeriod && (debugCounter++ % 2000) == 0) {
+            DBG("GAP PERIOD DEBUG (sustained gap period):");
+            DBG("  chance=" + juce::String(chance) + ", stutterIsScheduled=" + juce::String((int)stutterIsScheduled));
+            DBG("  DryGain=" + juce::String(currentDryGain));
+        }
+
+        wasInGapPeriod = inGapPeriod;
+
+        // SEPARATED FADE LOGIC - Wet and Dry fades are independent
+
+        // WET FADE-OUT: Now handled by macro envelope internal fade logic
+
+        // DRY FADE LOGIC: 1ms before new beat (based on quantCount and stutter scheduling)
+        bool dryFading = false;
+        if (samplesToNextBeat <= fadeLengthInSamples && samplesToNextBeat >= 0 && (quantCount+1) == quantToNewBeat) {
+            dryFading = true;
+            // Ensure proper boundary handling: when samplesToNextBeat=0, progress=1.0; when samplesToNextBeat=fadeLengthInSamples, progress=0.0
+            float dryFadeProgress = juce::jlimit(0.0f, 1.0f, 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples);
+
+            if (!stutterIsScheduled && autoStutterActive) {
+                // Stutter→Dry: dry fades from 0 to 1
+                float startGain = 0.0f;
+                float endGain = 1.0f;
+                currentDryGain = startGain + (endGain - startGain) * dryFadeProgress;
+
+                if (chance >= 0.99f) {
+                    DBG("DRY FADE STUTTER->DRY: Progress=" + juce::String(dryFadeProgress) + ", DryGain=" + juce::String(currentDryGain));
+                }
+
+            } else if (stutterIsScheduled && autoStutterActive) {
+                // Stutter→Stutter: dry fades from 0 to firstSampleGain
+                int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * heldMacroGateParam));
+                float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
+                float nextFirstSampleGain = calculateGain(firstSampleProgress, heldMacroShapeParam);
+
+                float macroSmoothAmount = heldMacroSmoothParam * 0.3f;
+                if (macroSmoothAmount > 0.0f && firstSampleProgress < macroSmoothAmount) {
+                    float fadeInGain = firstSampleProgress / macroSmoothAmount;
+                    nextFirstSampleGain *= fadeInGain;
+                }
+
+                float startGain = 0.0f;
+                float endGain = nextFirstSampleGain;
+                currentDryGain = startGain + (endGain - startGain) * dryFadeProgress;
+
+                if (chance >= 0.99f) {
+                    DBG("DRY FADE STUTTER->STUTTER: Progress=" + juce::String(dryFadeProgress) + ", DryGain=" + juce::String(currentDryGain) + ", Target=" + juce::String(nextFirstSampleGain));
+                }
+
+            } else if (stutterIsScheduled && !autoStutterActive) {
+                // Dry→Stutter: dry fades from 1 to firstSampleGain
+                int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * heldMacroGateParam));
+                float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
+                float nextFirstSampleGain = calculateGain(firstSampleProgress, heldMacroShapeParam);
+
+                float macroSmoothAmount = heldMacroSmoothParam * 0.3f;
+                if (macroSmoothAmount > 0.0f && firstSampleProgress < macroSmoothAmount) {
+                    float fadeInGain = firstSampleProgress / macroSmoothAmount;
+                    nextFirstSampleGain *= fadeInGain;
+                }
+
+                float startGain = 1.0f;
+                float endGain = nextFirstSampleGain;
+                currentDryGain = startGain + (endGain - startGain) * dryFadeProgress;
+
+                if (chance >= 0.99f) {
+                    DBG("DRY FADE DRY->STUTTER: Progress=" + juce::String(dryFadeProgress) + ", DryGain=" + juce::String(currentDryGain) + ", Target=" + juce::String(nextFirstSampleGain));
+                }
+            }
+        } else if (!dryFading) {
+            // No dry fade happening - set default states
+            if (autoStutterActive && postStutterSilence <= 0) {
+                // Active stuttering, no fade: dry silent
+                currentDryGain = 0.0f;
+            } else if (!autoStutterActive) {
+                // No stutter: dry at full volume
+                currentDryGain = 1.0f;
+            }
+            // else: keep whatever dry gain was set by fade logic
+        }
+        // else: No stuttering, no fade - defaults remain (dry=1.0, wet=0.0) from line 422-423
+
+        // 100% CHANCE GAIN DEBUG
+        if (chance >= 0.99f && (testDebugCounter % 1000) == 500) {
+            DBG("GAINS: dry=" + juce::String(currentDryGain) + " | active=" + juce::String((int)autoStutterActive) + ", silence=" + juce::String(postStutterSilence));
+        }
+
+        // =============================================================================
+        // MAIN AUDIO PROCESSING
+        // Apply envelopes and generate output based on current stutter state
+        // =============================================================================
+
+        // PRE-CALCULATE INDICES AND PARAMETERS (once per sample, before channel processing)
+        int loopLen = 0;
+        int readIndex = 0;
+        int loopPos = 0;
+        int startOfLoopReadIndex = 0;
+        bool shouldApplyNanoSmooth = false;
+        int nanoFadeLen = 0;
+        float nanoFadeProgress = 0.0f;
+
+        if (autoStutterActive)
+        {
+            // Calculate stutter loop parameters
+            loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate), 1, maxStutterLenSamples);
+            readIndex = (stutterWritePos + stutterPlayCounter) % maxStutterLenSamples;
+            loopPos = stutterPlayCounter % (loopLen);
+
+            // Pre-calculate nano smooth parameters
+            nanoFadeLen = static_cast<int>((float)loopLen * nanoSmoothParam * 0.25f);
+            shouldApplyNanoSmooth = (nanoFadeLen > 1 && loopPos >= loopLen - nanoFadeLen && nanoSmoothParam > 0.0f);
+            if (shouldApplyNanoSmooth) {
+                startOfLoopReadIndex = (stutterWritePos + stutterPlayCounter - loopPos) % maxStutterLenSamples;
+                nanoFadeProgress = (float)(loopPos - (loopLen - nanoFadeLen)) / (float)nanoFadeLen;
+            }
+        }
+
+        for (int ch = 0; ch < totalNumOutputChannels; ++ch)
+        {
+            float drySample = buffer.getSample(ch, i);
+            float wetSample = 0.0f;
+
+            // GENERATE WET SIGNAL when stuttering (SIMPLIFIED: only autoStutterActive)
+            if (autoStutterActive)
+            {
+
+                // NANO ENVELOPE (controls internal loop behavior)
+                float nanoGateMultiplier = 0.25f + nanoGateParam * 0.75f;
+                nanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
+                float nanoProgress = (float)loopPos / (float)nanoEnvelopeLengthInSamples;
+                float nanoGain = calculateGain(nanoProgress, nanoShapeParam);;
+
+                if (loopPos < nanoEnvelopeLengthInSamples) {
+                    // Check if we're in fade-out region (1ms before effective gate end)
+                    int fadeOutLen = static_cast<int>(sampleRate * 0.0001f); // 1ms fade-out
+                    int fadeOutStart = std::max(0, nanoEnvelopeLengthInSamples - fadeOutLen);
+
+                    if (loopPos >= fadeOutStart && fadeOutLen > 0) {
+                        // We're in the fade-out region
+                        float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(loopPos - fadeOutStart) / (float)fadeOutLen);
+                        nanoGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                    }
+                } else {
+                    nanoGain = 0.0f; // Silent after effective gate
+                }
+
+                // MACRO ENVELOPE (controls overall event shape - uses held parameters)
+                // MacroGate scales the envelope length (0.25 = 25% of total length, 1.0 = 100% of length)
+                float macroGateScale = juce::jlimit(0.25f, 1.0f, heldMacroGateParam);
+                int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * macroGateScale));
+                float macroProgress = juce::jlimit(0.0f, 1.0f, (float)macroEnvelopeCounter / (float)effectiveMacroLength);
+                float macroGain = calculateGain(macroProgress, heldMacroShapeParam);
+                
+                // Apply macro smooth fades (using held parameters)
+                float macroSmoothAmount = heldMacroSmoothParam * 0.3f;
+                if (macroSmoothAmount > 0.0f) {
+                    if (macroProgress < macroSmoothAmount) {
+                        macroGain *= macroProgress / macroSmoothAmount;
+                    } else if (macroProgress > (1.0f - macroSmoothAmount)) {
+                        macroGain *= (1.0f - macroProgress) / macroSmoothAmount;
+                    }
+                }
+
+                if (macroEnvelopeCounter <= effectiveMacroLength) {
+                    // Check if we're in fade-out region (1ms before effective gate end)
+                    int fadeOutLen = static_cast<int>(sampleRate * 0.001f); // 1ms fade-out
+                    int fadeOutStart = std::max(1, effectiveMacroLength - fadeOutLen);
+
+                    if (macroEnvelopeCounter >= fadeOutStart && fadeOutLen > 0) {
+                        // We're in the fade-out region
+                        float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(macroEnvelopeCounter - fadeOutStart) / (float)fadeOutLen);
+                        macroGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                    }
+                } else {
+                    macroGain = 0.0f; // Silent after effective gate
+                }
+
+                // Debug macro envelope for first few samples
+                if (macroEnvelopeCounter <= 5 && ch == 0) {
+                    DBG("Macro Envelope Debug: Counter=" + juce::String(macroEnvelopeCounter)
+                        + ", EffectiveLen=" + juce::String(effectiveMacroLength)
+                        + ", Progress=" + juce::String(macroProgress) + ", Gain=" + juce::String(macroGain)
+                        + ", HeldGate=" + juce::String(heldMacroGateParam));
+                }
+
+                // 100% CHANCE MACRO ENVELOPE DEBUG
+                static int macroDebugCounter = 0;
+                if (chance >= 0.99f && ch == 0 && (macroDebugCounter++ % 3000) == 0) {
+                    DBG("100% MACRO DEBUG: Counter=" + juce::String(macroEnvelopeCounter) + "/" + juce::String(macroEnvelopeLengthInSamples)
+                        + ", EffectiveLen=" + juce::String(effectiveMacroLength) + ", MacroGain=" + juce::String(macroGain)
+                        + ", NanoGain=" + juce::String(nanoGain) + ", BufferSample=" + juce::String(stutterBuffer.getSample(ch, readIndex)));
+                }
+
+                
+
+                // Generate base wet sample
+                wetSample = stutterBuffer.getSample(ch, readIndex) * macroGain * nanoGain;
+
+                // FOCUSED WET GAIN FADE DEBUG - Track fade transitions and gain spikes
+                static int fadeDebugCounter = 0;
+                static bool wasFadingOut = false;
+                static float lastWetSample = 0.0f;
+                static float lastMacroGain = 0.0f;
+
+                // Calculate remaining samples to match logic above
+                int debugRemainingSamples = effectiveMacroLength - macroEnvelopeCounter;
+                bool currentlyFadingOut = (debugRemainingSamples <= fadeLengthInSamples && debugRemainingSamples >= 0);
+                bool fadeTransition = (currentlyFadingOut != wasFadingOut);
+                float wetSampleDelta = std::abs(wetSample - lastWetSample);
+                float macroGainDelta = std::abs(macroGain - lastMacroGain);
+
+                // Debug on fade transitions or large sample jumps
+                if (ch == 0 && chance >= 0.99f && (fadeTransition || wetSampleDelta > 0.1f || (fadeDebugCounter++ % 500) == 0)) {
+                    DBG("=== WET FADE DEBUG ===");
+                    DBG("Counter=" + juce::String(macroEnvelopeCounter) + ", Remaining=" + juce::String(debugRemainingSamples) + ", FadeLen=" + juce::String(fadeLengthInSamples));
+                    DBG("MacroGain=" + juce::String(macroGain) + " (Δ=" + juce::String(macroGainDelta) + "), NanoGain=" + juce::String(nanoGain));
+                    DBG("WetSample=" + juce::String(wetSample) + " (Δ=" + juce::String(wetSampleDelta) + "), BufferSample=" + juce::String(stutterBuffer.getSample(ch, readIndex)));
+                    DBG("FadingOut=" + juce::String((int)currentlyFadingOut) + ", Transition=" + juce::String((int)fadeTransition));
+                    DBG("EffectiveLen=" + juce::String(effectiveMacroLength) + ", MacroProgress=" + juce::String((float)macroEnvelopeCounter / (float)effectiveMacroLength));
+                }
+
+                wasFadingOut = currentlyFadingOut;
+                lastWetSample = wetSample;
+                lastMacroGain = macroGain;
+
+                // Apply nano smooth (crossfade between loop repetitions) - using pre-calculated values
+                if (shouldApplyNanoSmooth)
+                {
+                    float incomingSample = stutterBuffer.getSample(ch, startOfLoopReadIndex) * macroGain * nanoGain;
+                    wetSample = wetSample * (1.0f - nanoFadeProgress) + incomingSample * nanoFadeProgress;
+                }
+            }
+
+            // APPLY FADE GAINS from Decision Point 3
+            float fadedDrySample = drySample * currentDryGain;
+            float fadedWetSample = wetSample;
+
+            // 100% CHANCE WET SIGNAL DEBUG
+            static int wetDebugCounter = 0;
+            if (chance >= 0.99f && ch == 0 && (wetDebugCounter++ % 2000) == 0) {
+                DBG("WET SIGNAL DEBUG: wetSample=" + juce::String(wetSample) + ", fadedWetSample=" + juce::String(fadedWetSample) + ", autoStutterActive=" + juce::String((int)autoStutterActive));
+            }
+
+            // MIX MODES - determine final output
+            float outputSample;
+            if (mixMode == 0) {         // GATE MODE: wet signal or silence only
+                outputSample = fadedWetSample;
+            } else if (mixMode == 1) {  // INSERT MODE: stutter replaces dry signal
+                // In insert mode, fade gains control replacement:
+                // - During stutter: currentDryGain=0, currentWetGain=1 (wet replaces dry)
+                // - During fade: gains transition smoothly
+                // - When not stuttering: currentDryGain=1, currentWetGain=0 (dry only)
+                outputSample = fadedDrySample + fadedWetSample;
+
+                // Debug insert mode signal chain
+                static int insertDebugCounter = 0;
+                if (mixMode == 1 && !autoStutterActive && (insertDebugCounter++ % 2000) == 0 && ch == 0) {
+                    DBG("INSERT MODE SIGNAL CHAIN DEBUG:");
+                    DBG("  drySample=" + juce::String(drySample) + ", wetSample=" + juce::String(wetSample));
+                    DBG("  currentDryGain=" + juce::String(currentDryGain));
+                    DBG("  fadedDrySample=" + juce::String(fadedDrySample) + ", fadedWetSample=" + juce::String(fadedWetSample));
+                    DBG("  outputSample=" + juce::String(outputSample));
+                    DBG("  autoStutterActive=" + juce::String((int)autoStutterActive) + ", postStutterSilence=" + juce::String(postStutterSilence));
+                }
+            } else {                    // MIX MODE: blend during stutter, dry otherwise
+                outputSample = (autoStutterActive && postStutterSilence <= 0) ? (fadedDrySample + fadedWetSample) * 0.5f : fadedDrySample;
+            }
+
+            buffer.setSample(ch, i, outputSample);
+        }
+
+        // UPDATE COUNTERS (after all channels have been processed with same indices)
+        if (autoStutterActive) {
+            ++stutterPlayCounter;
+            if (stutterPlayCounter >= loopLen) {
+                stutterPlayCounter = 0;  // Reset to 0 after playing loopLen samples
+            }
+            macroEnvelopeCounter++;
+            --autoStutterRemainingSamples;
+
+            // Universal countdown for Decision Point 2 (works for all stutter types)
+            if (currentStutterRemainingSamples > 0) --currentStutterRemainingSamples;
+        }
+
+        // =============================================================================
+        // END-OF-EVENT CLEANUP (moved to before Decision Point 1)
+        // Handle stutter event completion and state reset
+        // =============================================================================
+
+        // Track and debug postStutterSilence countdown
+        if (postStutterSilence > 0) {
+            --postStutterSilence;
+            // Debug postStutterSilence countdown in insert mode
+            static int silenceDebugCounter = 0;
+            if (mixMode == 1 && (silenceDebugCounter++ % 500) == 0) {
+                DBG("POST-STUTTER SILENCE DEBUG: postStutterSilence=" + juce::String(postStutterSilence)
+                    + ", autoStutterActive=" + juce::String((int)autoStutterActive));
+            }
+        }
+
+        // Update state tracking for next iteration
+        wasStuttering = (autoStutterActive && postStutterSilence <= 0);
     }
     writePos = (writePos + numSamples) % maxStutterLenSamples;
 }
@@ -475,12 +860,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "autoStutterGate", "Auto Stutter Gate", 0.25f, 1.0f, 1.0f));
-    params.push_back(std::make_unique<juce::AudioParameterBool>("stutterOn", "Stutter On", false));
-    params.push_back(std::make_unique<juce::AudioParameterBool>("autoStutterEnabled", "Auto Stutter Enabled", false));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("autoStutterChance", "Auto Stutter Chance", 0.0f, 1.0f, 0.6f));
+        juce::ParameterID("autoStutterGate", 1), "Auto Stutter Gate", 0.25f, 1.0f, 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("stutterOn",1), "Stutter On", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("autoStutterEnabled",1), "Auto Stutter Enabled", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("autoStutterChance",1), "Auto Stutter Chance", 0.0f, 1.0f, 0.6f));
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        "autoStutterQuant", "Auto Stutter Quantization",
+        juce::ParameterID("autoStutterQuant", 1), "Auto Stutter Quantization",
         juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 1));
 
     // Quant unit probability parameters
@@ -488,41 +873,41 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     for (int i = 0; i < quantLabels.size(); ++i)
     {
         juce::String id = "quantProb_" + quantLabels[i];
-        float defaultValue = (quantLabels[i] == "1/8") ? 1.0f : 0.0f; // 1/8th at max, others at 0
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.0f, 1.0f, defaultValue));
+        float defaultValue = (quantLabels[i] == "1/8") ? 1.0f : (quantLabels[i] == "1/16") ? 0.5f : 0.0f; // 1/8th at max, 1/16th at 50%, others at 0
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1), id, 0.0f, 1.0f, defaultValue));
     }
 
     auto rateLabels = juce::StringArray { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
     for (const auto& label : rateLabels)
     {
         juce::String id = "rateProb_" + label;
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.0f, 1.0f, 0.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1), id, 0.0f, 1.0f, 0.0f));
     }
 
     for (int i = 0; i < 12; ++i)
     {
         juce::String id = "nanoProb_" + juce::String(i);
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.0f, 1.0f, 0.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1), id, 0.0f, 1.0f, 0.0f));
     }
 
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("nanoBlend", "Repeat/Nano", 0.0f, 1.0f, 0.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("nanoTune", "Nano Tune", 0.75f, 2.0f, 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("nanoBlend", 1), "Repeat/Nano", 0.0f, 1.0f, 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("nanoTune", 1), "Nano Tune", 0.75f, 2.0f, 1.0f));
 
     for (int i = 0; i < 12; ++i)
     {
         juce::String id = "nanoRatio_" + juce::String(i);
         float defaultRatio = std::pow(2.0f, static_cast<float>(i) / 12.0f);
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(id, id, 0.1f, 2.0f, defaultRatio));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1), id, 0.1f, 2.0f, defaultRatio));
     }
 
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("NanoGate", "Nano Gate", 0.0f, 1.0f, 1.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("NanoShape", "Nano Shape", 0.0f, 1.0f, 0.5f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("NanoSmooth", "Nano Smooth", 0.0f, 1.0f, 0.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("MacroGate", "Macro Gate", 0.0f, 1.0f, 1.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("MacroShape", "Macro Shape", 0.0f, 1.0f, 0.5f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("MacroSmooth", "Macro Smooth", 0.0f, 1.0f, 0.0f));
-    params.push_back(std::make_unique<juce::AudioParameterChoice>("MixMode", "Mix Mode", 
-        juce::StringArray{"Gate", "Insert", "Mix"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGate", 1), "Nano Gate", 0.0f, 1.0f, 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShape", 1), "Nano Shape", 0.0f, 1.0f, 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoSmooth", 1), "Nano Smooth", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroGate", 1), "Macro Gate", 0.25f, 1.0f, 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroShape", 1), "Macro Shape", 0.0f, 1.0f, 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroSmooth", 1), "Macro Smooth", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID("MixMode", 1), "Mix Mode",
+        juce::StringArray{"Gate", "Insert", "Mix"}, 1));
 
     return { params.begin(), params.end() };
 }

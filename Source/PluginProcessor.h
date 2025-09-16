@@ -71,20 +71,23 @@ public:
     bool                      stutterLatched      = false;   // true while slice is repeating
     int                       stutterLenSamples   = 0;       // length of the 1/64-note in samples
     int                       stutterPlayCounter  = 0;       // wraps 0…stutterLenSamples-1
-    int                       stutterWritePos     = 0; // Tracks where to record in the stutterBuffer
     double                    lastQuantizedBeat   = -1.0;  // used to detect new quantized beat
     bool                      autoStutterActive = false; // NEW: controls stutter playback without changing the GUI
     int                       autoStutterRemainingSamples = 0;
+    int                       currentStutterRemainingSamples = 0;  // Universal countdown for ANY active stutter event
     double                    chosenDenominator = 64;
     double                    secondsPerWholeNote = 4;
     int                       manualStutterRateDenominator = -1;
     bool                      manualStutterTriggered = false;
+    int                       quantCount = 0;
+    std::atomic<int>          stutterWritePos = 0; // Tracks where to record in the stutterBuffer
 
     // ==== New Fade & State Logic ====
     int fadeLengthInSamples = 0;
     bool stutterIsScheduled = false;
     double lastDecisionBeat = -1.0;
     int postStutterSilence = 0;
+    int stutterEventLengthSamples = 0; // Pre-calculated stutter event length for fade logic
     
     // State tracking for fade logic
     bool wasStuttering = false;
@@ -99,11 +102,21 @@ public:
     std::array<float, 12> nanoRateWeights {{ 0.0f }};
     std::array<float, 4> quantUnitWeights {{ 0.0f }};
     float nanoBlend = 0.0f;
+
+    // Sample-and-hold envelope parameters (sampled 1ms before stutter events)
+    float heldMacroGateParam = 1.0f;
+    float heldMacroShapeParam = 0.5f;
+    float heldMacroSmoothParam = 0.0f;
+    bool parametersHeld = false;
     
     // Dynamic quantization
     int currentQuantIndex = 1; // Default to 1/8 (index 1)
     int nextQuantIndex = 1;
     bool quantDecisionPending = false;
+
+    // Transport state tracking for quantization alignment
+    bool wasPlaying = false;
+    double lastPpqPosition = -1.0;
     
 
     // Ratio/denominator lookup
@@ -126,6 +139,26 @@ public:
     void parameterChanged(const juce::String& parameterID, float newValue) override;
 
     void setManualStutterRate(int rate) { manualStutterRateDenominator = rate; }
+
+    // Weighted probability selection utility
+    template<typename Container>
+    static int selectWeightedIndex(const Container& weights, int defaultIndex = 0)
+    {
+        int idx = defaultIndex;
+        float total = std::accumulate(weights.begin(), weights.end(), 0.0f);
+        if (total > 0.0f) {
+            float r = juce::Random::getSystemRandom().nextFloat() * total;
+            float accum = 0.0f;
+            for (int j = 0; j < (int)weights.size(); ++j) {
+                accum += weights[j];
+                if (r <= accum) {
+                    idx = j;
+                    break;
+                }
+            }
+        }
+        return idx;
+    }
 
 private:
     //==============================================================================
