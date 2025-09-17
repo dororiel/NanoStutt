@@ -750,7 +750,11 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Apply nano smooth (crossfade between loop repetitions) - using pre-calculated values
                 if (shouldApplyNanoSmooth)
                 {
-                    float incomingSample = stutterBuffer.getSample(ch, startOfLoopReadIndex) * macroGain * nanoGain;
+                    // Calculate nano gain for loop start position (beginning of nano envelope)
+                    float loopStartNanoProgress = 0.0f; // Beginning of loop = beginning of nano envelope
+                    float loopStartNanoGain = calculateGain(loopStartNanoProgress, nanoShapeParam);
+
+                    float incomingSample = stutterBuffer.getSample(ch, startOfLoopReadIndex) * macroGain * loopStartNanoGain;
                     wetSample = wetSample * (1.0f - nanoFadeProgress) + incomingSample * nanoFadeProgress;
                 }
             }
