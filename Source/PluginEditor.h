@@ -69,9 +69,11 @@ public:
 
     juce::Slider nanoGateSlider, nanoShapeSlider, nanoSmoothSlider;
     juce::Slider macroGateSlider, macroShapeSlider, macroSmoothSlider;
+    juce::Slider timingOffsetSlider;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateAttachment, nanoShapeAttachment, nanoSmoothAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateAttachment, macroShapeAttachment, macroSmoothAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> timingOffsetAttachment;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stutterAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoStutterToggleAttachment;

@@ -81,7 +81,7 @@ public:
     bool                      manualStutterTriggered = false;
     int                       quantCount = 0;
     std::atomic<int>          stutterWritePos = 0; // Tracks where to record in the stutterBuffer
-
+    int                       quantToNewBeat = 4;
     // ==== New Fade & State Logic ====
     int fadeLengthInSamples = 0;
     bool stutterIsScheduled = false;
@@ -117,6 +117,9 @@ public:
     // Transport state tracking for quantization alignment
     bool wasPlaying = false;
     double lastPpqPosition = -1.0;
+
+    // Manual timing offset for master track delay compensation
+    std::atomic<float>* timingOffsetParam = nullptr;
     
 
     // Ratio/denominator lookup

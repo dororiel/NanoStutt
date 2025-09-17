@@ -63,6 +63,13 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     setupKnob(macroShapeSlider, "MacroShape", macroShapeAttachment);
     setupKnob(macroSmoothSlider, "MacroSmooth", macroSmoothAttachment);
 
+    // === Timing Offset Slider ===
+    addAndMakeVisible(timingOffsetSlider);
+    timingOffsetSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    timingOffsetSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    timingOffsetAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.parameters, "TimingOffset", timingOffsetSlider);
+
     // === Labels ===
     auto setupLabel = [this] (juce::Label& label, const juce::String& text, juce::Component& component)
     {
@@ -383,6 +390,9 @@ void NanoStuttAudioProcessorEditor::resized()
     int bottomControlsY = std::max(macroSmoothSlider.getBottom(), nanoSmoothSlider.getBottom());
     nanoBlendSlider.setBounds(margin, bottomControlsY + spacing, 150, 20);
     nanoTuneSlider.setBounds(margin, nanoBlendSlider.getBottom() + 10, 150, 20);
+
+    // === Timing Offset Slider ===
+    timingOffsetSlider.setBounds(margin, nanoTuneSlider.getBottom() + 10, 150, 20);
     
     // === Visualizer (Bottom) ===
     int visHeight = 70;

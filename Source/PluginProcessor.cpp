@@ -91,7 +91,8 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     maxStutterLenSamples = static_cast<int>(sampleRate * maxStutterSeconds);
     stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
     fadeLengthInSamples = static_cast<int>(sampleRate * 0.001); // 1ms fade
-    
+
+
 }
 
 void NanoStuttAudioProcessor::releaseResources()
@@ -148,36 +149,83 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         return;
     }
 
-    // Check for transport restart or position jump
+    // Check for transport restart or position jump (using RAW PPQ, before timing offset)
     bool transportJustStarted = !wasPlaying && isPlaying;
     bool positionJumped = wasPlaying && std::abs(currentPpqPosition - lastPpqPosition) > 0.125; // Allow small timing variations
 
     if (transportJustStarted || positionJumped) {
         // Reset quantization alignment based on new PPQ position
-        // PPQ / 0.125 = number of 1/32nd notes from song start
-        double thirtySecondNotes = currentPpqPosition / 0.125;
-        bool isEven = (static_cast<int>(std::round(thirtySecondNotes)) % 2) == 0;
-        quantCount = isEven ? 1 : 0;
+        // Find the smallest active quantization unit to align to its grid
+        static const std::array<double, 4> quantUnits = {0.25, 0.125, 0.0625, 0.03125}; // 1/4, 1/8, 1/16, 1/32
+        static const std::array<int, 4> quantToNewBeatValues = {8, 4, 2, 1}; // 1/32nds per unit
+
+        // Find smallest active quantization unit (highest frequency)
+        double activeQuantUnit = 0.125; // Default to 1/8th
+        int activeQuantToNewBeat = 4;   // Default to 1/8th (4 x 1/32nds)
+
+        // Debug: ensure we're finding the right quantization unit (commented out - working correctly)
+        // if (chance >= 0.99f) {
+        //     DBG("TRANSPORT RESET - Finding active quant unit:");
+        //     for (size_t i = 0; i < quantUnitWeights.size(); ++i) {
+        //         DBG("  quantUnitWeights[" + juce::String(i) + "] = " + juce::String(quantUnitWeights[i]));
+        //     }
+        // }
+
+        for (size_t i = quantUnitWeights.size(); i > 0; --i) {
+            if (quantUnitWeights[i-1] > 0.0f) {
+                activeQuantUnit = quantUnits[i-1];
+                activeQuantToNewBeat = quantToNewBeatValues[i-1];
+                if (chance >= 0.99f) {
+                    DBG("  Selected: index=" + juce::String(i-1) + ", unit=" + juce::String(activeQuantUnit) + ", quantToNewBeat=" + juce::String(activeQuantToNewBeat));
+                }
+                break; // Found smallest (work backwards from 1/32 to 1/4)
+            }
+        }
+
+        // Calculate alignment to the active quantization unit's grid
+        // (Note: activeQuantNotes calculation removed as it was unused)
+
+        quantToNewBeat = activeQuantToNewBeat;
+        // Convert from active quant units to 1/32nd note positions
+        // Don't use modulo here - let quantCount reach quantToNewBeat and trigger events
+        double adjustedPpqPosition = currentPpqPosition;
+        // Note: timing offset will be applied later, but we need consistent alignment
+        double thirtySecondNotes = adjustedPpqPosition / 0.125;
+        int totalThirtySeconds = static_cast<int>(std::floor(thirtySecondNotes));
+        // Set quantCount to align with the quantization boundary
+        // For 1/8th (quantToNewBeat=4): trigger should happen ON the boundary, not after
+        int currentBoundary = (totalThirtySeconds / quantToNewBeat) * quantToNewBeat;
+        quantCount = totalThirtySeconds - currentBoundary;
+
+        // If we're exactly on a boundary, trigger immediately
+        if (quantCount == 0) {
+            quantCount = quantToNewBeat; // Will trigger immediately
+        }
+
+        if (chance >= 0.99f) {
+            DBG("ALIGNMENT: totalThirtySeconds=" + juce::String(totalThirtySeconds) + ", currentBoundary=" + juce::String(currentBoundary) + ", quantCount=" + juce::String(quantCount));
+        }
+
 
         // Reset all stutter and timing variables
-        autoStutterActive = false;
-        stutterIsScheduled = false;
-        autoStutterRemainingSamples = 0;
-        postStutterSilence = 0;
-        parametersHeld = false;
-        macroEnvelopeCounter = 1;
-        writePos = 0;
+        //autoStutterActive = false;
+        //stutterIsScheduled = false;
+        //autoStutterRemainingSamples = 0;
+        //postStutterSilence = 0;
+        //parametersHeld = false;
+        //macroEnvelopeCounter = 1;
+        //writePos = 0;
 
         if (chance >= 0.99f) {
             DBG("*** TRANSPORT RESET *** PPQ=" + juce::String(currentPpqPosition)
-                + ", 32nds=" + juce::String(thirtySecondNotes) + ", quantCount=" + juce::String(quantCount)
+                 + ", quantCount=" + juce::String(quantCount)
                 + ", jumped=" + juce::String((int)positionJumped) + ", started=" + juce::String((int)transportJustStarted));
         }
     }
 
-    // Update transport state tracking
+    // Update transport state tracking (using RAW PPQ position, not offset-adjusted)
     wasPlaying = isPlaying;
-    lastPpqPosition = currentPpqPosition;
+    lastPpqPosition = currentPpqPosition; // Store RAW position for accurate jump detection
 
     bool autoStutter  = params.getRawParameterValue("autoStutterEnabled")->load();
     auto mixMode      = (int) params.getRawParameterValue("MixMode")->load();
@@ -198,6 +246,13 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             ppqAtStartOfBlock = position->getPpqPosition().orFallback(0.0);
             bpm = position->getBpm().orFallback(120.0);
         }
+
+    // Apply timing offset for master track delay compensation
+    // NOTE: Applied AFTER transport state tracking to avoid corrupting jump detection
+    float timingOffsetMs = parameters.getRawParameterValue("TimingOffset")->load();
+    double timingOffsetSamples = (timingOffsetMs / 1000.0) * sampleRate;
+    double timingOffsetPpq = (timingOffsetSamples / sampleRate) * (bpm / 60.0);
+    ppqAtStartOfBlock += timingOffsetPpq;
 
     double ppqPerSample = (bpm / 60.0) / sampleRate;
     double quantUnit = 1.0 / std::pow(2.0, currentQuantIndex);
@@ -260,9 +315,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
         // Fixed quantization logic: 1/32nd static beat detection
         double staticQuantUnit = 0.125; // 1/32nd note
-        int quantToNewBeat = static_cast<int>(quantUnit / staticQuantUnit); // How many 1/32nds in chosen quant
-        quantToNewBeat = std::max(1, quantToNewBeat); // Ensure at least 1
-
+        
+        
         // Calculate timing for all decision points
         double quantizedBeat = std::floor(currentPpq / staticQuantUnit);
         double nextBeatPpq = (quantizedBeat + 1.0) * staticQuantUnit;
@@ -329,7 +383,11 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 if (currentQuantIndex != nextQuantIndex) {
                     currentQuantIndex = nextQuantIndex;
                     quantUnit = 1.0 / std::pow(2.0, currentQuantIndex);
+                    quantToNewBeat = static_cast<int>(quantUnit / staticQuantUnit); // How many 1/32nds in chosen quant
+                    quantToNewBeat = std::max(1, quantToNewBeat); // Ensure at least 1
+
                 }
+                
                 
                 // Calculate stutter event duration for this quantization unit
                 float gateScale = params.getRawParameterValue("autoStutterGate")->load();
@@ -403,8 +461,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 
                 // DECIDE NEXT QUANTIZATION UNIT for future events
                 nextQuantIndex = selectWeightedIndex(quantUnitWeights, 1); // Default to 1/8
-                
-                quantCount = 0;
+
+                // Reset quantCount based on current position, not arbitrarily to 0
+                // This prevents timing drift between consecutive stutters
+                double currentPpqInLoop = ppqAtStartOfBlock + (i * ppqPerSample);
+                double thirtySecondNotes = currentPpqInLoop / 0.125;
+                int totalThirtySeconds = static_cast<int>(std::floor(thirtySecondNotes));
+                int currentBoundary = (totalThirtySeconds / quantToNewBeat) * quantToNewBeat;
+                quantCount = totalThirtySeconds - currentBoundary;
             }
                 
         }
@@ -913,6 +977,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID("MixMode", 1), "Mix Mode",
         juce::StringArray{"Gate", "Insert", "Mix"}, 1));
 
+    // Timing offset parameter for master track delay compensation
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("TimingOffset", 1), "Timing Offset (ms)",
+        -100.0f, 100.0f, 0.0f));
+
     return { params.begin(), params.end() };
 }
 
@@ -951,6 +1020,7 @@ void NanoStuttAudioProcessor::initializeParameterListeners()
         parameters.addParameterListener("nanoRatio_" + std::to_string(i), this);
 
     parameters.addParameterListener("nanoBlend", this);
+    parameters.addParameterListener("TimingOffset", this);
 
     updateCachedParameters();
 }
