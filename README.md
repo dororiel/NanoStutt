@@ -31,6 +31,7 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 ### Auto Stutter System
 - **Auto Stutter Toggle**: Enable/disable automatic stutter triggering
 - **Stutter Chance**: Global probability (0.0-1.0) for stutter events to occur
+- **Reverse Chance**: Probability (0.0-1.0) that stutter events will reverse after first repeat cycle
 - **Quantization Selection**: Choose timing resolution (1/4, 1/8, 1/16, 1/32 notes)
 - **Weighted Rate Selection**: Each rate has individual probability settings
 - **Probabilistic Quantization**: Each quantization unit (1/4, 1/8, 1/16, 1/32) has adjustable probability weights
@@ -65,6 +66,17 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 
 ### Visual Feedback
 - **Stutter Visualizer**: Real-time waveform display of current stutter buffer contents
+
+### Timing Controls
+- **Timing Offset**: Manual timing offset parameter (-100ms to +100ms) for master track delay compensation in Ableton Live
+
+### Reverse Playback System
+- **Intelligent Reverse Logic**: When reverse is triggered, the first repeat cycle plays forward, then subsequent cycles play in reverse
+- **Seamless Integration**: Reverse playback works with all stutter rates, quantization units, and envelope settings
+- **Per-Event Decision**: Each stutter event independently decides whether to reverse based on probability
+- **Example**: For a 1/8th quantization with 1/16th repeat rate marked for reverse:
+  - 1st 1/16th cycle: Forward playback
+  - 2nd 1/16th cycle onward: Reverse playback until stutter event ends
 
 ## Technical Architecture
 
@@ -118,6 +130,9 @@ make -j4
 - ✅ Core stutter engine with sample-accurate timing
 - ✅ Weighted probability system for all rates
 - ✅ **Probabilistic quantization system** with dynamic timing resolution
+- ✅ **Perfect grid alignment** - stutters trigger exactly on quantization boundaries
+- ✅ **Master track delay compensation** - manual timing offset parameter
+- ✅ **Reverse playback system** - intelligent reverse logic with first-cycle-forward behavior
 - ✅ Pre-emptive fade system with click elimination
 - ✅ Dual envelope architecture (Nano + Macro)
 - ✅ All three mix modes (Gate, Insert, Mix)
@@ -128,14 +143,15 @@ make -j4
 
 ### Known Issues
 - Manual stutter buttons may need GUI integration
-- Some edge cases in fade transitions may need refinement
 
-### Recent Improvements (Last Commit: 4fe4226)
-- Implemented pre-emptive fade system using mid-point decision strategy
-- Enhanced Nano Smooth parameter for true loop crossfading
-- Fixed sample-accurate timing for all stutter operations
-- Eliminated clicks in most stutter scenarios
-- Improved stereo processing and fade logic
+### Recent Improvements (Last Commit: 20a846c)
+- **Fixed perfect timing alignment** - stutters now trigger exactly on DAW grid boundaries
+- **Eliminated 1/32nd timing drift** between consecutive stutter events
+- **Added timing offset parameter** for master track delay compensation (-100ms to +100ms)
+- **Improved quantization unit detection** - respects active probability weights
+- **Enhanced transport reset logic** - maintains alignment at loop points and transport jumps
+- **Resolved wet fade-out issues** - clean macro envelope fade without gain offsets
+- **Fixed nano smooth crossfading** - proper envelope gain calculation for loop transitions
 
 ## Development Notes
 

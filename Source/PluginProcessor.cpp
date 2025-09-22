@@ -405,6 +405,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // Engage stutter with rate system selection
                     autoStutterActive = true;
                     secondsPerWholeNote = 240.0 / bpm;
+
+                    // DECISION: Whether this stutter event should be reversed
+                    float reverseChance = parameters.getRawParameterValue("reverseChance")->load();
+                    currentStutterIsReversed = juce::Random::getSystemRandom().nextFloat() < reverseChance;
+                    firstRepeatCyclePlayed = false;
+                    cycleCompletionCounter = 0; // Reset cycle counter for new stutter event
+
+                    if (chance >= 0.99f || reverseChance > 0.5f) {
+                        DBG("*** REVERSE DEBUG *** reverseChance=" + juce::String(reverseChance) +
+                            ", currentStutterIsReversed=" + juce::String((int)currentStutterIsReversed));
+                    }
                     
                     // DECISION: Nano vs Rhythmical system selection
                     bool useNano = juce::Random::getSystemRandom().nextFloat() < nanoBlend;
@@ -691,14 +702,52 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         {
             // Calculate stutter loop parameters
             loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate), 1, maxStutterLenSamples);
-            readIndex = (stutterWritePos + stutterPlayCounter) % maxStutterLenSamples;
+
+            // Handle reverse playback logic
             loopPos = stutterPlayCounter % (loopLen);
+
+            // Note: First cycle completion detection moved to counter update section
+
+            if (currentStutterIsReversed && firstRepeatCyclePlayed) {
+                // After first cycle, play in reverse within each loop cycle
+                int reversedLoopPos = loopLen - 1 - loopPos;
+                readIndex = (stutterWritePos + reversedLoopPos) % maxStutterLenSamples;
+
+                // Debug logging for reverse playback
+                static int reverseDebugCounter = 0;
+                if ((reverseDebugCounter++ % 1000) == 0) {
+                    DBG("*** REVERSE PLAYBACK *** loopPos=" + juce::String(loopPos) +
+                        ", reversedLoopPos=" + juce::String(reversedLoopPos) +
+                        ", stutterPlayCounter=" + juce::String(stutterPlayCounter) +
+                        ", loopLen=" + juce::String(loopLen));
+                }
+            } else {
+                // Normal forward playback (including first cycle of reversed events)
+                readIndex = (stutterWritePos + loopPos) % maxStutterLenSamples;
+
+                // Debug logging for forward playback during reverse events
+                if (currentStutterIsReversed) {
+                    static int forwardDebugCounter = 0;
+                    if ((forwardDebugCounter++ % 1000) == 0) {
+                        DBG("*** FIRST CYCLE FORWARD *** loopPos=" + juce::String(loopPos) +
+                            ", stutterPlayCounter=" + juce::String(stutterPlayCounter) +
+                            ", loopLen=" + juce::String(loopLen) +
+                            ", firstRepeatCyclePlayed=" + juce::String((int)firstRepeatCyclePlayed));
+                    }
+                }
+            }
 
             // Pre-calculate nano smooth parameters
             nanoFadeLen = static_cast<int>((float)loopLen * nanoSmoothParam * 0.25f);
             shouldApplyNanoSmooth = (nanoFadeLen > 1 && loopPos >= loopLen - nanoFadeLen && nanoSmoothParam > 0.0f);
             if (shouldApplyNanoSmooth) {
-                startOfLoopReadIndex = (stutterWritePos + stutterPlayCounter - loopPos) % maxStutterLenSamples;
+                if (currentStutterIsReversed && firstRepeatCyclePlayed) {
+                    // For reverse playback, the start of loop is at the end of the forward direction
+                    startOfLoopReadIndex = (stutterWritePos + loopLen - 1) % maxStutterLenSamples;
+                } else {
+                    // Normal forward direction
+                    startOfLoopReadIndex = (stutterWritePos + stutterPlayCounter - loopPos) % maxStutterLenSamples;
+                }
                 nanoFadeProgress = (float)(loopPos - (loopLen - nanoFadeLen)) / (float)nanoFadeLen;
             }
         }
@@ -864,6 +913,15 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         // UPDATE COUNTERS (after all channels have been processed with same indices)
         if (autoStutterActive) {
             ++stutterPlayCounter;
+
+            // Track when we complete the first repeat cycle for reverse playback
+            if (currentStutterIsReversed && !firstRepeatCyclePlayed && stutterPlayCounter >= loopLen) {
+                firstRepeatCyclePlayed = true;
+                DBG("*** FIRST CYCLE COMPLETE *** stutterPlayCounter=" + juce::String(stutterPlayCounter) +
+                    ", loopLen=" + juce::String(loopLen) +
+                    ", switching to REVERSE mode");
+            }
+
             if (stutterPlayCounter >= loopLen) {
                 stutterPlayCounter = 0;  // Reset to 0 after playing loopLen samples
             }
@@ -932,6 +990,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("stutterOn",1), "Stutter On", false));
     params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("autoStutterEnabled",1), "Auto Stutter Enabled", false));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("autoStutterChance",1), "Auto Stutter Chance", 0.0f, 1.0f, 0.6f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("reverseChance",1), "Reverse Chance", 0.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("autoStutterQuant", 1), "Auto Stutter Quantization",
         juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 1));

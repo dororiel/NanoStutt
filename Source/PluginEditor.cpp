@@ -37,6 +37,14 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     autoStutterChanceAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.parameters, "autoStutterChance", autoStutterChanceSlider);
 
+    // === Reverse Chance Slider ===
+    addAndMakeVisible(reverseChanceSlider);
+    reverseChanceSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    reverseChanceSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+
+    reverseChanceAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.parameters, "reverseChance", reverseChanceSlider);
+
     // === Quantization Menu ===
     addAndMakeVisible(autoStutterQuantMenu);
     autoStutterQuantMenu.addItem("1/4", 1);
@@ -140,6 +148,10 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     chanceLabel.setText("Chance", juce::dontSendNotification);
     chanceLabel.attachToComponent(&autoStutterChanceSlider, false);
     addAndMakeVisible(chanceLabel);
+
+    reverseLabel.setText("Reverse", juce::dontSendNotification);
+    reverseLabel.attachToComponent(&reverseChanceSlider, false);
+    addAndMakeVisible(reverseLabel);
 
     quantLabel.setText("Quant", juce::dontSendNotification);
     quantLabel.attachToComponent(&autoStutterQuantMenu, false);
@@ -353,6 +365,12 @@ void NanoStuttAudioProcessorEditor::resized()
     controlY += 40;
 
     autoStutterChanceSlider.setBounds(controlPanelX, controlY, 110, 30);  // Larger slider
+    controlY += 40;
+
+    reverseLabel.setBounds(controlPanelX, controlY, 110, 20);
+    controlY += 20;
+
+    reverseChanceSlider.setBounds(controlPanelX, controlY, 110, 30);  // Larger slider
     controlY += 40;
 
     // === Quant Probability Sliders (larger, horizontal layout) ===

@@ -65,6 +65,7 @@ public:
     juce::ToggleButton stutterButton;
     juce::ToggleButton autoStutterToggle;
     juce::Slider autoStutterChanceSlider;
+    juce::Slider reverseChanceSlider;
     juce::ComboBox autoStutterQuantMenu;
 
     juce::Slider nanoGateSlider, nanoShapeSlider, nanoSmoothSlider;
@@ -78,6 +79,7 @@ public:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stutterAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoStutterToggleAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> autoStutterChanceAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> reverseChanceAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> autoStutterQuantAttachment;
     juce::OwnedArray<juce::Slider> rateProbSliders;
     juce::OwnedArray<juce::Label> rateProbLabels;
@@ -86,7 +88,7 @@ public:
     juce::OwnedArray<juce::Slider> quantProbSliders;
     juce::OwnedArray<juce::Label> quantProbLabels;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> quantProbAttachments;
-    juce::Label chanceLabel, quantLabel;
+    juce::Label chanceLabel, reverseLabel, quantLabel;
     juce::Label nanoGateLabel, nanoShapeLabel, nanoSmoothLabel;
     juce::Label macroGateLabel, macroShapeLabel, macroSmoothLabel;
     juce::Label nanoControlsLabel, macroControlsLabel;
