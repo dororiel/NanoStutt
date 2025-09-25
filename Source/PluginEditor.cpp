@@ -385,17 +385,8 @@ void NanoStuttAudioProcessorEditor::resized()
         visualizerHeight
     );
 
-    // === LEFT PANEL: Use Grid for Envelope Controls + Utilities ===
-    Grid leftPanelGrid;
-    leftPanelGrid.templateRows = { Track(Fr(2)), Track(Fr(1)) }; // Envelopes take 2/3, utilities 1/3
-    leftPanelGrid.templateColumns = { Track(Fr(1)) };
-    leftPanelGrid.rowGap = Px(10);
-
-    // Split left panel into envelope and utility areas
-    auto envelopeBounds = leftBounds.withTrimmedBottom(leftBounds.getHeight() / 3);
-    auto utilityBounds = leftBounds.withTrimmedTop(2 * leftBounds.getHeight() / 3);
-
-    // Envelope controls using Grid
+    // === LEFT PANEL: Envelope Controls Only ===
+    // Envelope controls using Grid - now uses full left panel
     Grid envelopeGrid;
     envelopeGrid.templateRows = {
         Track(Px(18)), Track(Px(60)), Track(Px(60)), Track(Px(2)), // Macro section with less spacing
@@ -416,23 +407,7 @@ void NanoStuttAudioProcessorEditor::resized()
         GridItem(nanoShapeSlider).withArea(6, 2),
         GridItem(nanoSmoothSlider).withArea(7, 1, 7, 3) // Span both columns
     };
-    envelopeGrid.performLayout(envelopeBounds);
-
-    // Utilities using Grid
-    Grid utilitiesGrid;
-    utilitiesGrid.templateRows = {
-        Track(Fr(1)), Track(Fr(1)), Track(Fr(1)), Track(Fr(1))
-    };
-    utilitiesGrid.templateColumns = { Track(Fr(1)) };
-    utilitiesGrid.rowGap = Px(4);
-
-    utilitiesGrid.items = {
-        GridItem(nanoTuneSlider),
-        GridItem(waveshaperAlgorithmMenu),
-        GridItem(waveshaperSlider),
-        GridItem(timingOffsetSlider)
-    };
-    utilitiesGrid.performLayout(utilityBounds);
+    envelopeGrid.performLayout(leftBounds);
 
     // === CENTER PANEL: Rate Probabilities using Grid ===
     Grid centerPanelGrid;
@@ -505,18 +480,22 @@ void NanoStuttAudioProcessorEditor::resized()
     }
     quantGrid.performLayout(quantBounds);
 
-    // === RIGHT PANEL: Chance, Repeat/Nano, Reverse using Grid ===
-    Grid rightGrid;
-    rightGrid.templateRows = {
+    // === RIGHT PANEL: Split into main controls and utilities ===
+    // Calculate split: main controls on top, utilities on bottom
+    auto rightMainBounds = rightBounds.withTrimmedBottom(rightBounds.getHeight() / 2);
+    auto rightUtilityBounds = rightBounds.withTrimmedTop(rightBounds.getHeight() / 2).withTrimmedTop(10);
+
+    // Main right panel controls (Chance, Repeat/Nano, Reverse)
+    Grid rightMainGrid;
+    rightMainGrid.templateRows = {
         Track(Px(20)), Track(Px(30)), Track(Px(8)),  // Chance
         Track(Px(20)), Track(Px(30)), Track(Px(8)),  // Repeat/Nano
-        Track(Px(20)), Track(Px(30)), Track(Px(15)), // Reverse
-        Track(Fr(1)), Track(Px(30))   // Flexible space + stutter button
+        Track(Px(20)), Track(Px(30))                 // Reverse (no extra space)
     };
-    rightGrid.templateColumns = { Track(Fr(1)) };
-    rightGrid.rowGap = Px(4);
+    rightMainGrid.templateColumns = { Track(Fr(1)) };
+    rightMainGrid.rowGap = Px(4);
 
-    rightGrid.items = {
+    rightMainGrid.items = {
         GridItem(chanceLabel),
         GridItem(autoStutterChanceSlider),
         GridItem(), // Spacer
@@ -524,12 +503,25 @@ void NanoStuttAudioProcessorEditor::resized()
         GridItem(nanoBlendSlider),
         GridItem(), // Spacer
         GridItem(reverseLabel),
-        GridItem(reverseChanceSlider),
-        GridItem(), // Spacer
-        GridItem(), // Flexible spacer
-        GridItem(stutterButton)
+        GridItem(reverseChanceSlider)
     };
-    rightGrid.performLayout(rightBounds);
+    rightMainGrid.performLayout(rightMainBounds);
+
+    // Utilities grid in bottom right
+    Grid utilitiesGrid;
+    utilitiesGrid.templateRows = {
+        Track(Fr(1)), Track(Fr(1)), Track(Fr(1)), Track(Fr(1))
+    };
+    utilitiesGrid.templateColumns = { Track(Fr(1)) };
+    utilitiesGrid.rowGap = Px(4);
+
+    utilitiesGrid.items = {
+        GridItem(nanoTuneSlider),
+        GridItem(waveshaperAlgorithmMenu),
+        GridItem(waveshaperSlider),
+        GridItem(timingOffsetSlider)
+    };
+    utilitiesGrid.performLayout(rightUtilityBounds);
 
     // === VISUALIZER ===
     visualizer.setBounds(visualizerBounds);
@@ -537,9 +529,10 @@ void NanoStuttAudioProcessorEditor::resized()
     // Hide unused components
     autoStutterQuantMenu.setVisible(false);
     quantLabel.setVisible(false);
+    stutterButton.setVisible(false); // Hide manual stutter button
 
-    // Set minimum size for better layout
-    setResizeLimits(1000, 650, 1600, 1000);
+    // Set minimum size for better layout - reduced height for compact design
+    setResizeLimits(1000, 550, 1600, 900);
 }
 
 void NanoStuttAudioProcessorEditor::updateNanoRatioFromFraction(int index)

@@ -738,7 +738,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 outputSample = fadedDrySample + fadedWetSample;
 
             } else {                    // MIX MODE: blend during stutter, dry otherwise
-                outputSample = (autoStutterActive && postStutterSilence <= 0) ? (fadedDrySample + fadedWetSample) * 0.5f : fadedDrySample;
+                outputSample = (autoStutterActive && postStutterSilence <= 0) ? (drySample + fadedWetSample) * 0.5f : fadedDrySample;
             }
 
             buffer.setSample(ch, i, outputSample);
