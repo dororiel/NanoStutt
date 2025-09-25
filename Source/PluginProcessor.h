@@ -107,6 +107,9 @@ public:
     float heldMacroGateParam = 1.0f;
     float heldMacroShapeParam = 0.5f;
     float heldMacroSmoothParam = 0.0f;
+    float heldNanoGateParam = 1.0f;
+    float heldNanoShapeParam = 0.5f;
+    float heldNanoSmoothParam = 0.0f;
     bool parametersHeld = false;
     
     // Dynamic quantization
