@@ -219,6 +219,31 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     nanoTuneAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.parameters, "nanoTune", nanoTuneSlider);
 
+    nanoTuneLabel.setText("Nano Tune", juce::dontSendNotification);
+    nanoTuneLabel.attachToComponent(&nanoTuneSlider, false);
+    addAndMakeVisible(nanoTuneLabel);
+
+    // === Waveshaper Controls ===
+    addAndMakeVisible(waveshaperAlgorithmMenu);
+    waveshaperAlgorithmMenu.addItem("None", 1);
+    waveshaperAlgorithmMenu.addItem("Soft Clip", 2);
+    waveshaperAlgorithmMenu.addItem("Tanh", 3);
+    waveshaperAlgorithmMenu.addItem("Hard Clip", 4);
+    waveshaperAlgorithmMenu.addItem("Tube", 5);
+    waveshaperAlgorithmMenu.addItem("Asymmetric", 6);
+    waveshaperAlgorithmAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.parameters, "WaveshapeAlgorithm", waveshaperAlgorithmMenu);
+
+    addAndMakeVisible(waveshaperSlider);
+    waveshaperSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    waveshaperSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    waveshaperAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.parameters, "WaveshapeIntensity", waveshaperSlider);
+
+    waveshaperLabel.setText("Waveshaper", juce::dontSendNotification);
+    waveshaperLabel.attachToComponent(&waveshaperSlider, false);
+    addAndMakeVisible(waveshaperLabel);
+
     // === Editable Nano Ratio Numerator/Denominator Sliders ===
     for (int i = 0; i < 12; ++i)
     {
@@ -301,120 +326,220 @@ void NanoStuttAudioProcessorEditor::paint (juce::Graphics& g)
 
 void NanoStuttAudioProcessorEditor::resized()
 {
-    const int margin = 20;
+    using Grid = juce::Grid;
+    using GridItem = juce::GridItem;
+    using Track = Grid::TrackInfo;
+    using Fr = Grid::Fr;
+    using Px = Grid::Px;
+
+    auto bounds = getLocalBounds();
+
+    // === Mix Mode in top-right corner (absolute positioning) ===
+    mixModeMenu.setBounds(bounds.getWidth() - 125, 5, 115, 22);
+
+    // Create main layout grid
+    Grid mainGrid;
+    mainGrid.templateRows = { Track(Fr(1)), Track(Px(70)) }; // Main content + Visualizer
+    mainGrid.templateColumns = {
+        Track(Px(170)),  // Left panel
+        Track(Fr(1)),    // Center panel
+        Track(Px(140))   // Right panel
+    };
+    mainGrid.columnGap = Px(10);
+    mainGrid.rowGap = Px(10);
+
+    // We need to position components directly since GridItem can't contain other grids
+    auto contentBounds = bounds.reduced(8).withTrimmedTop(35); // Leave space for mix mode
+
+    // Calculate panel bounds based on grid proportions
+    const int leftWidth = 170;
+    const int rightWidth = 140;
     const int spacing = 10;
-    const int sliderWidth = 50;
-    const int sliderHeight = 110;
-    const int buttonHeight = 25;
-    const int knobSize = 70;
+    const int visualizerHeight = 70;
 
-    const int numRates = rateProbSliders.size();
-    const int totalSliderWidth = numRates * (sliderWidth + spacing) - spacing;
-    const int startX = (getWidth() - totalSliderWidth) / 2;
-    const int sliderY = margin + 20;
-    const int buttonY = sliderY + sliderHeight + spacing;
+    auto leftBounds = juce::Rectangle<int>(
+        contentBounds.getX(),
+        contentBounds.getY() - 35,
+        leftWidth,
+        contentBounds.getHeight() - visualizerHeight - spacing + 35
+    );
 
-    // === Rate Probability Sliders + Manual Buttons ===
-    for (int i = 0; i < numRates; ++i)
+    auto centerBounds = juce::Rectangle<int>(
+        contentBounds.getX() + leftWidth + spacing,
+        contentBounds.getY(),
+        contentBounds.getWidth() - leftWidth - rightWidth - 2 * spacing,
+        contentBounds.getHeight() - visualizerHeight - spacing
+    );
+
+    auto rightBounds = juce::Rectangle<int>(
+        contentBounds.getRight() - rightWidth,
+        contentBounds.getY(),
+        rightWidth,
+        contentBounds.getHeight() - visualizerHeight - spacing
+    );
+
+    auto visualizerBounds = juce::Rectangle<int>(
+        contentBounds.getX(),
+        contentBounds.getBottom() - visualizerHeight,
+        contentBounds.getWidth(),
+        visualizerHeight
+    );
+
+    // === LEFT PANEL: Use Grid for Envelope Controls + Utilities ===
+    Grid leftPanelGrid;
+    leftPanelGrid.templateRows = { Track(Fr(2)), Track(Fr(1)) }; // Envelopes take 2/3, utilities 1/3
+    leftPanelGrid.templateColumns = { Track(Fr(1)) };
+    leftPanelGrid.rowGap = Px(10);
+
+    // Split left panel into envelope and utility areas
+    auto envelopeBounds = leftBounds.withTrimmedBottom(leftBounds.getHeight() / 3);
+    auto utilityBounds = leftBounds.withTrimmedTop(2 * leftBounds.getHeight() / 3);
+
+    // Envelope controls using Grid
+    Grid envelopeGrid;
+    envelopeGrid.templateRows = {
+        Track(Px(18)), Track(Px(60)), Track(Px(60)), Track(Px(2)), // Macro section with less spacing
+        Track(Px(18)), Track(Px(60)), Track(Px(60))  // Nano section
+    };
+    envelopeGrid.templateColumns = { Track(Fr(1)), Track(Fr(1)) }; // 2 equal columns
+    envelopeGrid.columnGap = Px(8);
+    envelopeGrid.rowGap = Px(15); // Reduced row gap
+
+    envelopeGrid.items = {
+        GridItem(macroControlsLabel).withArea(1, 1, 1, 3), // Span both columns
+        GridItem(macroGateSlider).withArea(2, 1),
+        GridItem(macroShapeSlider).withArea(2, 2),
+        GridItem(macroSmoothSlider).withArea(3, 1, 3, 3), // Span both columns
+        GridItem(), // Empty spacer
+        GridItem(nanoControlsLabel).withArea(5, 1, 5, 3), // Span both columns
+        GridItem(nanoGateSlider).withArea(6, 1),
+        GridItem(nanoShapeSlider).withArea(6, 2),
+        GridItem(nanoSmoothSlider).withArea(7, 1, 7, 3) // Span both columns
+    };
+    envelopeGrid.performLayout(envelopeBounds);
+
+    // Utilities using Grid
+    Grid utilitiesGrid;
+    utilitiesGrid.templateRows = {
+        Track(Fr(1)), Track(Fr(1)), Track(Fr(1)), Track(Fr(1))
+    };
+    utilitiesGrid.templateColumns = { Track(Fr(1)) };
+    utilitiesGrid.rowGap = Px(4);
+
+    utilitiesGrid.items = {
+        GridItem(nanoTuneSlider),
+        GridItem(waveshaperAlgorithmMenu),
+        GridItem(waveshaperSlider),
+        GridItem(timingOffsetSlider)
+    };
+    utilitiesGrid.performLayout(utilityBounds);
+
+    // === CENTER PANEL: Rate Probabilities using Grid ===
+    Grid centerPanelGrid;
+    centerPanelGrid.templateRows = {
+        Track(Px(100)), // Rhythmic sliders
+        Track(Px(160)), // Nano sliders - further increased height
+        Track(Px(30)),  // Auto toggle - slightly bigger
+        Track(Px(80))   // Quantization sliders - slightly bigger
+    };
+    centerPanelGrid.templateColumns = { Track(Fr(1)) };
+    centerPanelGrid.rowGap = Px(10);
+
+    // Calculate sub-bounds with proper spacing (100 + 10 + 160 + 10 + 30 + 10 + 80 = 400px total)
+    auto rhythmicBounds = centerBounds.withTrimmedBottom(centerBounds.getHeight() - 100);
+    auto nanoBounds = centerBounds.withTrimmedTop(110).withHeight(160);  // Full 160px height
+    auto toggleBounds = centerBounds.withTrimmedTop(280).withHeight(30); // Full 30px height
+    auto quantBounds = centerBounds.withTrimmedTop(320);                 // Remaining space
+
+    // Rhythmic rate sliders using Grid
+    Grid rhythmicGrid;
+    rhythmicGrid.templateRows = { Track(Fr(1)) };
+    rhythmicGrid.templateColumns.clear();
+    for (int i = 0; i < rateProbSliders.size(); ++i)
+        rhythmicGrid.templateColumns.add(Track(Fr(1)));
+    rhythmicGrid.columnGap = Px(4);
+
+    rhythmicGrid.items.clear();
+    for (int i = 0; i < rateProbSliders.size(); ++i)
+        rhythmicGrid.items.add(GridItem(*rateProbSliders[i]));
+    rhythmicGrid.performLayout(rhythmicBounds);
+
+    // Hide manual stutter buttons
+    for (int i = 0; i < manualStutterButtons.size(); ++i)
+        manualStutterButtons[i]->setVisible(false);
+
+    // Nano rate sliders with numerator/denominator using Grid
+    Grid nanoGrid;
+    nanoGrid.templateRows = { Track(Px(20)), Track(Px(20)), Track(Px(110)) }; // Num + Den + Slider - using full 150px of 160px bounds
+    nanoGrid.templateColumns.clear();
+    for (int i = 0; i < nanoRateProbSliders.size() && i < 12; ++i)
+        nanoGrid.templateColumns.add(Track(Fr(1)));
+    nanoGrid.columnGap = Px(3);
+    nanoGrid.rowGap = Px(0);
+
+    nanoGrid.items.clear();
+    for (int i = 0; i < nanoRateProbSliders.size() && i < 12; ++i)
     {
-        rateProbSliders[i]->setBounds(startX + i * (sliderWidth + spacing), sliderY, sliderWidth, sliderHeight);
-        manualStutterButtons[i]->setBounds(startX + i * (sliderWidth + spacing), buttonY, sliderWidth, buttonHeight);
+        nanoGrid.items.add(GridItem(*nanoNumerators[i]).withArea(1, i + 1));
+        nanoGrid.items.add(GridItem(*nanoDenominators[i]).withArea(2, i + 1));
+        nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(3, i + 1));
     }
-    
-    // === Nano Rate Sliders (below main set) ===
-    int nanoSliderY = buttonY + buttonHeight + spacing + 10;
-    for (int i = 0; i < nanoRateProbSliders.size(); ++i)
+    nanoGrid.performLayout(nanoBounds);
+
+    // Auto stutter toggle (center it)
+    autoStutterToggle.setBounds(toggleBounds.withSizeKeepingCentre(100, 22));
+
+    // Quantization sliders using Grid
+    Grid quantGrid;
+    quantGrid.templateRows = { Track(Px(55)), Track(Px(12)) }; // Sliders + Labels
+    quantGrid.templateColumns.clear();
+    for (int i = 0; i < quantProbSliders.size(); ++i)
+        quantGrid.templateColumns.add(Track(Fr(1)));
+    quantGrid.columnGap = Px(6);
+
+    quantGrid.items.clear();
+    for (int i = 0; i < quantProbSliders.size(); ++i)
     {
-        nanoRateProbSliders[i]->setBounds(startX + i * (sliderWidth + spacing), nanoSliderY, sliderWidth, sliderHeight);
+        quantGrid.items.add(GridItem(*quantProbSliders[i]).withArea(1, i + 1));
+        quantGrid.items.add(GridItem(*quantProbLabels[i]).withArea(2, i + 1));
     }
+    quantGrid.performLayout(quantBounds);
 
-    int numeratorY = nanoSliderY - 45;
-    int denominatorY = nanoSliderY - 25;
-    for (int i = 0; i < 12; ++i)
-    {
-        int x = startX + i * (sliderWidth + spacing);
-        nanoNumerators[i]->setBounds(x, numeratorY, sliderWidth, 20);
-        nanoDenominators[i]->setBounds(x, denominatorY, sliderWidth, 20);
-    }
+    // === RIGHT PANEL: Chance, Repeat/Nano, Reverse using Grid ===
+    Grid rightGrid;
+    rightGrid.templateRows = {
+        Track(Px(20)), Track(Px(30)), Track(Px(8)),  // Chance
+        Track(Px(20)), Track(Px(30)), Track(Px(8)),  // Repeat/Nano
+        Track(Px(20)), Track(Px(30)), Track(Px(15)), // Reverse
+        Track(Fr(1)), Track(Px(30))   // Flexible space + stutter button
+    };
+    rightGrid.templateColumns = { Track(Fr(1)) };
+    rightGrid.rowGap = Px(4);
 
-    // === Left-side controls ===
-    juce::Rectangle<int> leftPanel(margin, sliderY, knobSize * 2 + spacing, getHeight() - sliderY - 80);
-    
-    // Macro Controls Column
-    macroControlsLabel.setBounds(leftPanel.getX(), leftPanel.getY(), knobSize, 20);
-    macroGateSlider.setBounds(leftPanel.getX(), leftPanel.getY() + 20, knobSize, knobSize);
-    macroShapeSlider.setBounds(leftPanel.getX(), macroGateSlider.getBottom() + spacing, knobSize, knobSize);
-    macroSmoothSlider.setBounds(leftPanel.getX(), macroShapeSlider.getBottom() + spacing, knobSize, knobSize);
+    rightGrid.items = {
+        GridItem(chanceLabel),
+        GridItem(autoStutterChanceSlider),
+        GridItem(), // Spacer
+        GridItem(nanoBlendLabel),
+        GridItem(nanoBlendSlider),
+        GridItem(), // Spacer
+        GridItem(reverseLabel),
+        GridItem(reverseChanceSlider),
+        GridItem(), // Spacer
+        GridItem(), // Flexible spacer
+        GridItem(stutterButton)
+    };
+    rightGrid.performLayout(rightBounds);
 
-    // Nano Controls Column
-    int nanoColX = leftPanel.getX() + knobSize + spacing;
-    nanoControlsLabel.setBounds(nanoColX, leftPanel.getY(), knobSize, 20);
-    nanoGateSlider.setBounds(nanoColX, leftPanel.getY() + 20, knobSize, knobSize);
-    nanoShapeSlider.setBounds(nanoColX, nanoGateSlider.getBottom() + spacing, knobSize, knobSize);
-    nanoSmoothSlider.setBounds(nanoColX, nanoShapeSlider.getBottom() + spacing, knobSize, knobSize);
+    // === VISUALIZER ===
+    visualizer.setBounds(visualizerBounds);
 
-    // === Auto Stutter Section (Right) ===
-    const int controlPanelX = getWidth() - 120;
-    const int panelY = buttonY + buttonHeight + spacing;
-    int controlY = panelY;
-
-    autoStutterToggle.setBounds(controlPanelX, controlY, 110, 20);
-    controlY += 40;
-
-    chanceLabel.setBounds(controlPanelX, controlY, 110, 20);
-    controlY += 40;
-
-    autoStutterChanceSlider.setBounds(controlPanelX, controlY, 110, 30);  // Larger slider
-    controlY += 40;
-
-    reverseLabel.setBounds(controlPanelX, controlY, 110, 20);
-    controlY += 20;
-
-    reverseChanceSlider.setBounds(controlPanelX, controlY, 110, 30);  // Larger slider
-    controlY += 40;
-
-    // === Quant Probability Sliders (larger, horizontal layout) ===
-    const int quantSliderWidth = 35;
-    const int quantSliderHeight = 80;
-    const int quantSpacing = 5;
-    const int numQuantSliders = quantProbSliders.size();
-    const int totalQuantWidth = numQuantSliders * (quantSliderWidth + quantSpacing) - quantSpacing;
-    const int quantStartX = controlPanelX + (120 - totalQuantWidth) / 2; // Center within expanded width
-    
-    for (int i = 0; i < numQuantSliders; ++i)
-    {
-        int sliderX = quantStartX + i * (quantSliderWidth + quantSpacing);
-        quantProbSliders[i]->setBounds(sliderX, controlY, quantSliderWidth, quantSliderHeight);
-        // Position labels below sliders
-        quantProbLabels[i]->setBounds(sliderX, controlY + quantSliderHeight + 2, quantSliderWidth, 15);
-    }
-    controlY += quantSliderHeight + 20;
-
-    quantLabel.setText("Quant Probabilities", juce::dontSendNotification);
-    quantLabel.setBounds(controlPanelX, controlY, 110, 20);
-    controlY += 25;
-
-    // Hide the old static quantization menu since we now use dynamic probabilities
-    // autoStutterQuantMenu.setBounds(controlPanelX, controlY, 110, 24);
+    // Hide unused components
     autoStutterQuantMenu.setVisible(false);
-    // controlY += 40;
+    quantLabel.setVisible(false);
 
-    stutterButton.setBounds(controlPanelX, controlY, 110, 24);
-    controlY += 40;
-
-    mixModeMenu.setBounds(controlPanelX, controlY, 110, 24);
-    
-    // === Tune & Blend Sliders ===
-    int bottomControlsY = std::max(macroSmoothSlider.getBottom(), nanoSmoothSlider.getBottom());
-    nanoBlendSlider.setBounds(margin, bottomControlsY + spacing, 150, 20);
-    nanoTuneSlider.setBounds(margin, nanoBlendSlider.getBottom() + 10, 150, 20);
-
-    // === Timing Offset Slider ===
-    timingOffsetSlider.setBounds(margin, nanoTuneSlider.getBottom() + 10, 150, 20);
-    
-    // === Visualizer (Bottom) ===
-    int visHeight = 70;
-    visualizer.setBounds(margin, getHeight() - visHeight - margin, getWidth() - 2 * margin, visHeight);
+    // Set minimum size for better layout
+    setResizeLimits(1000, 650, 1600, 1000);
 }
 
 void NanoStuttAudioProcessorEditor::updateNanoRatioFromFraction(int index)

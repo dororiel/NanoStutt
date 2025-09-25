@@ -110,8 +110,14 @@ public:
     
     juce::Slider nanoTuneSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoTuneAttachment;
-   
+
     juce::Label nanoTuneLabel;
+
+    juce::ComboBox waveshaperAlgorithmMenu;
+    juce::Slider waveshaperSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> waveshaperAlgorithmAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> waveshaperAttachment;
+    juce::Label waveshaperLabel;
 
 
 

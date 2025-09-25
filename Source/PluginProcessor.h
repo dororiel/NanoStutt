@@ -129,7 +129,6 @@ public:
     bool firstRepeatCyclePlayed = false;        // Track if first repeat cycle has been played
     int cycleCompletionCounter = 0;             // Track how many cycles have been completed
 
-
     // Ratio/denominator lookup
     static constexpr std::array<int, 8> regularDenominators {{ 4, 3, 6, 8, 12, 16, 24, 32 }};
     static constexpr std::array<float, 12> nanoRatios {{

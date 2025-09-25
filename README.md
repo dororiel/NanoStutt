@@ -64,6 +64,17 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 - **Insert Mode**: Stutters inserted without replacing original audio
 - **Mix Mode**: Blend between dry and stuttered signals
 
+### Audio Processing
+- **Waveshaping**: Built-in waveshaping with multiple algorithms (None, Soft Clip, Tanh, Hard Clip, Tube, Asymmetric)
+- **Waveshape Intensity**: Control intensity of waveshaping effect (0.0-1.0, bypassed at 0)
+
+### User Interface
+- **Grid-based Layout**: Modern responsive layout using JUCE Grid system
+- **Left Panel**: Envelope controls (Macro/Nano) + utility controls (Nano Tune, Waveshaper, Timing Offset)
+- **Center Panel**: Rate probability sliders (regular rates → nano rates → auto toggle → quantization)
+- **Right Panel**: Chance, Repeat/Nano blend, Reverse controls + manual stutter button
+- **Optimized Spacing**: Expanded nano section with improved text box and slider proportions
+
 ### Visual Feedback
 - **Stutter Visualizer**: Real-time waveform display of current stutter buffer contents
 
@@ -133,6 +144,8 @@ make -j4
 - ✅ **Perfect grid alignment** - stutters trigger exactly on quantization boundaries
 - ✅ **Master track delay compensation** - manual timing offset parameter
 - ✅ **Reverse playback system** - intelligent reverse logic with first-cycle-forward behavior
+- ✅ **Waveshaping system** - built-in audio processing with 6 algorithms and intensity control
+- ✅ **Modern Grid-based UI** - responsive layout with organized control sections
 - ✅ Pre-emptive fade system with click elimination
 - ✅ Dual envelope architecture (Nano + Macro)
 - ✅ All three mix modes (Gate, Insert, Mix)

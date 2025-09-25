@@ -92,7 +92,6 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
     fadeLengthInSamples = static_cast<int>(sampleRate * 0.001); // 1ms fade
 
-
 }
 
 void NanoStuttAudioProcessor::releaseResources()
@@ -778,6 +777,76 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         wasStuttering = (autoStutterActive && postStutterSilence <= 0);
     }
     writePos = (writePos + numSamples) % maxStutterLenSamples;
+
+    // Apply waveshaping to final mixed output
+    auto waveshapeAlgorithm = parameters.getRawParameterValue("WaveshapeAlgorithm")->load();
+    auto waveshapeIntensity = parameters.getRawParameterValue("WaveshapeIntensity")->load();
+
+    if (waveshapeIntensity > 0.0f && waveshapeAlgorithm > 0)
+    {
+        // Apply waveshaping manually with optimized processing
+        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+        {
+            float* channelData = buffer.getWritePointer(channel);
+
+            switch (static_cast<int>(waveshapeAlgorithm))
+            {
+                case 1: // Soft Clip
+                    for (int sample = 0; sample < numSamples; ++sample)
+                    {
+                        float x = channelData[sample];
+                        channelData[sample] = juce::jlimit(-1.0f, 1.0f, x * (1.0f + waveshapeIntensity));
+                    }
+                    break;
+                case 2: // Tanh
+                    {
+                        float drive = 1.0f + waveshapeIntensity * 4.0f;
+                        float normalization = 1.0f / std::tanh(drive);
+                        for (int sample = 0; sample < numSamples; ++sample)
+                        {
+                            float x = channelData[sample];
+                            channelData[sample] = std::tanh(x * drive) * normalization;
+                        }
+                    }
+                    break;
+                case 3: // Hard Clip
+                    {
+                        float threshold = 1.0f - waveshapeIntensity * 0.8f;
+                        for (int sample = 0; sample < numSamples; ++sample)
+                        {
+                            float x = channelData[sample];
+                            channelData[sample] = juce::jlimit(-threshold, threshold, x);
+                        }
+                    }
+                    break;
+                case 4: // Tube
+                    {
+                        float drive = 1.0f + waveshapeIntensity * 3.0f;
+                        for (int sample = 0; sample < numSamples; ++sample)
+                        {
+                            float x = channelData[sample];
+                            float driven = x * drive;
+                            channelData[sample] = driven / (1.0f + std::abs(driven));
+                        }
+                    }
+                    break;
+                case 5: // Asymmetric
+                    {
+                        float drive = 1.0f + waveshapeIntensity * 2.0f;
+                        float normalization = 1.0f / std::tanh(drive);
+                        for (int sample = 0; sample < numSamples; ++sample)
+                        {
+                            float x = channelData[sample];
+                            if (x > 0.0f)
+                                channelData[sample] = std::tanh(x * drive) * normalization;
+                            else
+                                channelData[sample] = x * (1.0f + waveshapeIntensity * 0.5f);
+                        }
+                    }
+                    break;
+            }
+        }
+    }
 }
 
 
@@ -867,6 +936,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         juce::ParameterID("TimingOffset", 1), "Timing Offset (ms)",
         -100.0f, 100.0f, 0.0f));
 
+    // Waveshaping parameters
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("WaveshapeAlgorithm", 1), "Waveshape Algorithm",
+        juce::StringArray{"None", "Soft Clip", "Tanh", "Hard Clip", "Tube", "Asymmetric"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("WaveshapeIntensity", 1), "Waveshape Intensity",
+        0.0f, 1.0f, 0.0f));
+
     return { params.begin(), params.end() };
 }
 
@@ -906,6 +983,8 @@ void NanoStuttAudioProcessor::initializeParameterListeners()
 
     parameters.addParameterListener("nanoBlend", this);
     parameters.addParameterListener("TimingOffset", this);
+    parameters.addParameterListener("WaveshapeAlgorithm", this);
+    parameters.addParameterListener("WaveshapeIntensity", this);
 
     updateCachedParameters();
 }
