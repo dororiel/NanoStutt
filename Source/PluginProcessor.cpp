@@ -608,7 +608,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         if (autoStutterActive)
         {
             // Calculate stutter loop parameters
-            loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate), 1, maxStutterLenSamples);
+            loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate + 1), 1, maxStutterLenSamples);
 
             // Handle reverse playback logic
             loopPos = stutterPlayCounter % (loopLen);
@@ -629,6 +629,12 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             // Pre-calculate nano smooth parameters
             nanoFadeLen = static_cast<int>((float)loopLen * nanoSmoothParam * 0.25f);
             shouldApplyNanoSmooth = (nanoFadeLen > 1 && loopPos >= loopLen - nanoFadeLen && nanoSmoothParam > 0.0f);
+
+            // Skip nano smooth at end of first forward cycle when reverse is enabled
+            // because the reversed cycle starts at the exact same sample position
+            if (currentStutterIsReversed && !firstRepeatCyclePlayed) {
+                shouldApplyNanoSmooth = false;
+            }
             if (shouldApplyNanoSmooth) {
                 if (currentStutterIsReversed && firstRepeatCyclePlayed) {
                     // For reverse playback, the start of loop is at the end of the forward direction
@@ -658,13 +664,16 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                 if (loopPos < nanoEnvelopeLengthInSamples) {
                     // Check if we're in fade-out region (1ms before effective gate end)
-                    int fadeOutLen = static_cast<int>(sampleRate * 0.0001f); // 1ms fade-out
-                    int fadeOutStart = std::max(0, nanoEnvelopeLengthInSamples - fadeOutLen);
+                    // Only apply fade-out when nanoGate is not at maximum (1.0)
+                    if (nanoGateParam < 1.0f) {
+                        int fadeOutLen = static_cast<int>(sampleRate * 0.0001f); // 1ms fade-out
+                        int fadeOutStart = std::max(0, nanoEnvelopeLengthInSamples - fadeOutLen);
 
-                    if (loopPos >= fadeOutStart && fadeOutLen > 0) {
-                        // We're in the fade-out region
-                        float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(loopPos - fadeOutStart) / (float)fadeOutLen);
-                        nanoGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                        if (loopPos >= fadeOutStart && fadeOutLen > 0) {
+                            // We're in the fade-out region
+                            float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(loopPos - fadeOutStart) / (float)fadeOutLen);
+                            nanoGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                        }
                     }
                 } else {
                     nanoGain = 0.0f; // Silent after effective gate
