@@ -147,6 +147,7 @@ public:
     void updateCachedParameters();
     void initializeParameterListeners();
     void parameterChanged(const juce::String& parameterID, float newValue) override;
+    void updateWaveshaperFunction(int algorithm, float drive, bool gainCompensation);
 
     void setManualStutterRate(int rate) { manualStutterRateDenominator = rate; }
 
@@ -169,6 +170,12 @@ public:
         }
         return idx;
     }
+
+    // JUCE DSP Objects for waveshaping
+    juce::dsp::Gain<float> waveshaperInputGain;
+    juce::dsp::Gain<float> waveshaperOutputGain;
+    juce::dsp::WaveShaper<float> waveShaper;
+    juce::dsp::ProcessSpec dspSpec;
 
 private:
     //==============================================================================

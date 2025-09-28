@@ -230,7 +230,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     waveshaperAlgorithmMenu.addItem("Tanh", 3);
     waveshaperAlgorithmMenu.addItem("Hard Clip", 4);
     waveshaperAlgorithmMenu.addItem("Tube", 5);
-    waveshaperAlgorithmMenu.addItem("Asymmetric", 6);
+    waveshaperAlgorithmMenu.addItem("Fold", 6);
     waveshaperAlgorithmAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         audioProcessor.parameters, "WaveshapeAlgorithm", waveshaperAlgorithmMenu);
 
@@ -238,11 +238,17 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     waveshaperSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     waveshaperSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
     waveshaperAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        audioProcessor.parameters, "WaveshapeIntensity", waveshaperSlider);
+        audioProcessor.parameters, "Drive", waveshaperSlider);
 
-    waveshaperLabel.setText("Waveshaper", juce::dontSendNotification);
+    waveshaperLabel.setText("Drive", juce::dontSendNotification);
     waveshaperLabel.attachToComponent(&waveshaperSlider, false);
     addAndMakeVisible(waveshaperLabel);
+
+    // === Gain Compensation Toggle ===
+    addAndMakeVisible(gainCompensationToggle);
+    gainCompensationToggle.setButtonText("Gain Comp");
+    gainCompensationAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        audioProcessor.parameters, "GainCompensation", gainCompensationToggle);
 
     // === Editable Nano Ratio Numerator/Denominator Sliders ===
     for (int i = 0; i < 12; ++i)
@@ -519,6 +525,7 @@ void NanoStuttAudioProcessorEditor::resized()
         GridItem(nanoTuneSlider),
         GridItem(waveshaperAlgorithmMenu),
         GridItem(waveshaperSlider),
+        GridItem(gainCompensationToggle),
         GridItem(timingOffsetSlider)
     };
     utilitiesGrid.performLayout(rightUtilityBounds);

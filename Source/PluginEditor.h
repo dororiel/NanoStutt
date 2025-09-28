@@ -119,6 +119,9 @@ public:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> waveshaperAttachment;
     juce::Label waveshaperLabel;
 
+    juce::ToggleButton gainCompensationToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> gainCompensationAttachment;
+
 
 
 

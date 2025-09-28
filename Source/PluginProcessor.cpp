@@ -92,6 +92,17 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
     fadeLengthInSamples = static_cast<int>(sampleRate * 0.001); // 1ms fade
 
+    // Initialize JUCE DSP objects
+    dspSpec.sampleRate = sampleRate;
+    dspSpec.maximumBlockSize = static_cast<juce::uint32>(samplesPerBlock);
+    dspSpec.numChannels = static_cast<juce::uint32>(getTotalNumOutputChannels());
+
+    waveshaperInputGain.prepare(dspSpec);
+    waveshaperOutputGain.prepare(dspSpec);
+    waveShaper.prepare(dspSpec);
+
+    // Set up waveshaper function (will be updated based on algorithm parameter)
+    waveShaper.functionToUse = [](float x) { return x; }; // Default to no processing
 }
 
 void NanoStuttAudioProcessor::releaseResources()
@@ -787,75 +798,104 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     }
     writePos = (writePos + numSamples) % maxStutterLenSamples;
 
-    // Apply waveshaping to final mixed output
+    // Apply waveshaping using JUCE DSP with drive and gain compensation
     auto waveshapeAlgorithm = parameters.getRawParameterValue("WaveshapeAlgorithm")->load();
-    auto waveshapeIntensity = parameters.getRawParameterValue("WaveshapeIntensity")->load();
+    auto driveAmount = parameters.getRawParameterValue("Drive")->load();
+    auto gainCompensation = parameters.getRawParameterValue("GainCompensation")->load();
 
-    if (waveshapeIntensity > 0.0f && waveshapeAlgorithm > 0)
+    if (driveAmount > 0.0f && waveshapeAlgorithm > 0)
     {
-        // Apply waveshaping manually with optimized processing
-        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
-        {
-            float* channelData = buffer.getWritePointer(channel);
+        // Update waveshaper function and gains
+        updateWaveshaperFunction(static_cast<int>(waveshapeAlgorithm), driveAmount, gainCompensation > 0.5f);
 
-            switch (static_cast<int>(waveshapeAlgorithm))
-            {
-                case 1: // Soft Clip
-                    for (int sample = 0; sample < numSamples; ++sample)
-                    {
-                        float x = channelData[sample];
-                        channelData[sample] = juce::jlimit(-1.0f, 1.0f, x * (1.0f + waveshapeIntensity));
-                    }
-                    break;
-                case 2: // Tanh
-                    {
-                        float drive = 1.0f + waveshapeIntensity * 4.0f;
-                        float normalization = 1.0f / std::tanh(drive);
-                        for (int sample = 0; sample < numSamples; ++sample)
-                        {
-                            float x = channelData[sample];
-                            channelData[sample] = std::tanh(x * drive) * normalization;
-                        }
-                    }
-                    break;
-                case 3: // Hard Clip
-                    {
-                        float threshold = 1.0f - waveshapeIntensity * 0.8f;
-                        for (int sample = 0; sample < numSamples; ++sample)
-                        {
-                            float x = channelData[sample];
-                            channelData[sample] = juce::jlimit(-threshold, threshold, x);
-                        }
-                    }
-                    break;
-                case 4: // Tube
-                    {
-                        float drive = 1.0f + waveshapeIntensity * 3.0f;
-                        for (int sample = 0; sample < numSamples; ++sample)
-                        {
-                            float x = channelData[sample];
-                            float driven = x * drive;
-                            channelData[sample] = driven / (1.0f + std::abs(driven));
-                        }
-                    }
-                    break;
-                case 5: // Asymmetric
-                    {
-                        float drive = 1.0f + waveshapeIntensity * 2.0f;
-                        float normalization = 1.0f / std::tanh(drive);
-                        for (int sample = 0; sample < numSamples; ++sample)
-                        {
-                            float x = channelData[sample];
-                            if (x > 0.0f)
-                                channelData[sample] = std::tanh(x * drive) * normalization;
-                            else
-                                channelData[sample] = x * (1.0f + waveshapeIntensity * 0.5f);
-                        }
-                    }
-                    break;
-            }
-        }
+        // Create audio block for DSP processing
+        juce::dsp::AudioBlock<float> audioBlock(buffer);
+        juce::dsp::ProcessContextReplacing<float> context(audioBlock);
+
+        // Process through the DSP chain: Input Gain -> WaveShaper -> Output Gain
+        waveshaperInputGain.process(context);
+        waveShaper.process(context);
+        waveshaperOutputGain.process(context);
     }
+}
+
+void NanoStuttAudioProcessor::updateWaveshaperFunction(int algorithm, float drive, bool gainCompensation)
+{
+    // Drive controls input gain (1.0 to 10.0x range for aggressive saturation)
+    float inputGain = 1.0f + (drive * 9.0f); // 1.0x to 10.0x drive range
+    float outputGain = 1.0f;
+
+    // Set waveshaper function and calculate compensation gains
+    switch (algorithm)
+    {
+        case 0: // None
+            inputGain = 1.0f;
+            waveShaper.functionToUse = [](float x) { return x; };
+            break;
+
+        case 1: // Soft Clip
+            waveShaper.functionToUse = [](float x) {
+                return juce::jlimit(-1.0f, 1.0f, x);
+            };
+            // Subtle compensation for soft clipping
+            if (gainCompensation)
+                outputGain = 1.0f / std::sqrt(inputGain); // Gentle compensation
+            break;
+
+        case 2: // Tanh
+            waveShaper.functionToUse = [](float x) {
+                return std::tanh(x);
+            };
+            // Subtle compensation for tanh compression
+            if (gainCompensation)
+                outputGain = 1.0f / std::sqrt(inputGain); // Gentle compensation
+            break;
+
+        case 3: // Hard Clip
+            waveShaper.functionToUse = [](float x) {
+                return juce::jlimit(-1.0f, 1.0f, x);
+            };
+            // Subtle compensation for hard clipping
+            if (gainCompensation)
+                outputGain = 1.0f / std::sqrt(inputGain); // Gentle compensation
+            break;
+
+        case 4: // Tube
+            waveShaper.functionToUse = [](float x) {
+                return x / (1.0f + std::abs(x));
+            };
+            // Slightly stronger compensation for tube's asymptotic behavior
+            if (gainCompensation)
+                outputGain = 1.2f / std::sqrt(inputGain); // Gentle boost to compensate for tube saturation
+            break;
+
+        case 5: // Wavefolding
+            waveShaper.functionToUse = [](float x) {
+                // Proper wavefolding - strict bounds maintenance within [-1, 1]
+                // Use absolute value and sign tracking for correct reflection
+                float sign = x >= 0.0f ? 1.0f : -1.0f;
+                float y = std::abs(x);
+
+                // Fold the signal repeatedly until it's within [0, 1] range
+                while (y > 1.0f) {
+                    y = 2.0f - y;  // Reflect around 1.0
+                    if (y < 0.0f) {
+                        y = -y;    // If reflection goes negative, flip back positive
+                        sign = -sign; // And invert the sign
+                    }
+                }
+
+                return sign * y;
+            };
+            // Compensation for wavefolding (should be similar to other algorithms now)
+            if (gainCompensation)
+                outputGain = 1.0f / std::sqrt(inputGain); // Standard gentle compensation
+            break;
+    }
+
+    // Set the gain values
+    waveshaperInputGain.setGainLinear(inputGain);
+    waveshaperOutputGain.setGainLinear(outputGain);
 }
 
 
@@ -948,10 +988,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     // Waveshaping parameters
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("WaveshapeAlgorithm", 1), "Waveshape Algorithm",
-        juce::StringArray{"None", "Soft Clip", "Tanh", "Hard Clip", "Tube", "Asymmetric"}, 0));
+        juce::StringArray{"None", "Soft Clip", "Tanh", "Hard Clip", "Tube", "Fold"}, 0));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("WaveshapeIntensity", 1), "Waveshape Intensity",
+        juce::ParameterID("Drive", 1), "Drive",
         0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("GainCompensation", 1), "Gain Compensation", false));
 
     return { params.begin(), params.end() };
 }
@@ -993,7 +1035,8 @@ void NanoStuttAudioProcessor::initializeParameterListeners()
     parameters.addParameterListener("nanoBlend", this);
     parameters.addParameterListener("TimingOffset", this);
     parameters.addParameterListener("WaveshapeAlgorithm", this);
-    parameters.addParameterListener("WaveshapeIntensity", this);
+    parameters.addParameterListener("Drive", this);
+    parameters.addParameterListener("GainCompensation", this);
 
     updateCachedParameters();
 }
