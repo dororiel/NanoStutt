@@ -65,8 +65,9 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 - **Mix Mode**: Blend between dry and stuttered signals
 
 ### Audio Processing
-- **Waveshaping**: Built-in waveshaping with multiple algorithms (None, Soft Clip, Tanh, Hard Clip, Tube, Asymmetric)
-- **Waveshape Intensity**: Control intensity of waveshaping effect (0.0-1.0, bypassed at 0)
+- **Waveshaping**: Built-in waveshaping with multiple algorithms (None, Soft Clip, Tanh, Hard Clip, Tube, Fold)
+- **Drive**: Input gain control for waveshaping intensity (0.0-1.0, bypassed at 0)
+- **Gain Compensation**: Optional output compensation to maintain consistent volume levels (default: off)
 
 ### User Interface
 - **Grid-based Layout**: Modern responsive layout using JUCE Grid system
@@ -157,14 +158,14 @@ make -j4
 ### Known Issues
 - Manual stutter buttons may need GUI integration
 
-### Recent Improvements (Last Commit: 20a846c)
-- **Fixed perfect timing alignment** - stutters now trigger exactly on DAW grid boundaries
-- **Eliminated 1/32nd timing drift** between consecutive stutter events
-- **Added timing offset parameter** for master track delay compensation (-100ms to +100ms)
-- **Improved quantization unit detection** - respects active probability weights
-- **Enhanced transport reset logic** - maintains alignment at loop points and transport jumps
-- **Resolved wet fade-out issues** - clean macro envelope fade without gain offsets
-- **Fixed nano smooth crossfading** - proper envelope gain calculation for loop transitions
+### Recent Improvements (Last Commit: 0ac1e56)
+- **Implemented JUCE DSP-based waveshaping** - switched from manual processing to JUCE DSP objects for consistency
+- **Added proper wavefolding algorithm** - maintains strict ±1.0 bounds with correct signal reflection
+- **Replaced Waveshape Intensity with Drive** - now controls input gain for more intuitive saturation control
+- **Added Gain Compensation toggle** - optional output compensation for consistent volume levels (default: off)
+- **Updated waveshaping algorithms** - replaced Asymmetric with Fold for better wavefolding behavior
+- **Improved gain staging** - proper input drive and output compensation chain
+- **Enhanced audio processing chain** - uses JUCE DSP processing context for optimal performance
 
 ## Development Notes
 
