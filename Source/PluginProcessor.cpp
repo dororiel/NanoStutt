@@ -87,22 +87,71 @@ void NanoStuttAudioProcessor::changeProgramName (int index, const juce::String& 
 //==============================================================================
 void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    const double maxStutterSeconds = 3.0;
-    maxStutterLenSamples = static_cast<int>(sampleRate * maxStutterSeconds);
-    stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
-    fadeLengthInSamples = static_cast<int>(sampleRate * 0.001); // 1ms fade
+    // Validate input parameters
+    jassert(sampleRate > 0.0);
+    jassert(samplesPerBlock > 0);
 
-    // Initialize JUCE DSP objects
+    if (sampleRate <= 0.0 || samplesPerBlock <= 0)
+    {
+        DBG("NanoStuttAudioProcessor::prepareToPlay - Invalid parameters: sampleRate="
+            << sampleRate << ", samplesPerBlock=" << samplesPerBlock);
+        return;
+    }
+
+    maxStutterLenSamples = static_cast<int>(sampleRate * MAX_STUTTER_BUFFER_SECONDS);
+    stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
+    fadeLengthInSamples = static_cast<int>(sampleRate * FADE_DURATION_SECONDS);
+
+    // Initialize JUCE DSP ProcessorChain
     dspSpec.sampleRate = sampleRate;
     dspSpec.maximumBlockSize = static_cast<juce::uint32>(samplesPerBlock);
     dspSpec.numChannels = static_cast<juce::uint32>(getTotalNumOutputChannels());
 
-    waveshaperInputGain.prepare(dspSpec);
-    waveshaperOutputGain.prepare(dspSpec);
-    waveShaper.prepare(dspSpec);
+    waveshaperChain.prepare(dspSpec);
 
     // Set up waveshaper function (will be updated based on algorithm parameter)
-    waveShaper.functionToUse = [](float x) { return x; }; // Default to no processing
+    waveshaperChain.get<waveShaperIndex>().functionToUse = [](float x) { return x; }; // Default to no processing
+
+    // Initialize smoothed parameters
+    float smoothingTime0_3ms = 0.3f / 1000.0f;  // 0.3ms for fast response (prevents bleeding across events)
+
+    // Real-time envelope parameters (0.3ms smoothing)
+    smoothedNanoGate.reset(sampleRate, smoothingTime0_3ms);
+    smoothedNanoShape.reset(sampleRate, smoothingTime0_3ms);
+    smoothedNanoSmooth.reset(sampleRate, smoothingTime0_3ms);
+    smoothedMacroGate.reset(sampleRate, smoothingTime0_3ms);
+    smoothedMacroShape.reset(sampleRate, smoothingTime0_3ms);
+    smoothedMacroSmooth.reset(sampleRate, smoothingTime0_3ms);
+
+    // Held gate parameters (0.3ms smoothing)
+    smoothedHeldNanoGate.reset(sampleRate, smoothingTime0_3ms);
+    smoothedHeldMacroGate.reset(sampleRate, smoothingTime0_3ms);
+
+    // Set initial values from parameters
+    smoothedNanoGate.setCurrentAndTargetValue(parameters.getRawParameterValue("NanoGate")->load());
+    smoothedNanoShape.setCurrentAndTargetValue(parameters.getRawParameterValue("NanoShape")->load());
+    smoothedNanoSmooth.setCurrentAndTargetValue(parameters.getRawParameterValue("NanoSmooth")->load());
+    smoothedMacroGate.setCurrentAndTargetValue(parameters.getRawParameterValue("MacroGate")->load());
+    smoothedMacroShape.setCurrentAndTargetValue(parameters.getRawParameterValue("MacroShape")->load());
+    smoothedMacroSmooth.setCurrentAndTargetValue(parameters.getRawParameterValue("MacroSmooth")->load());
+
+    smoothedHeldNanoGate.setCurrentAndTargetValue(parameters.getRawParameterValue("NanoGate")->load());
+    smoothedHeldMacroGate.setCurrentAndTargetValue(parameters.getRawParameterValue("MacroGate")->load());
+
+    // Initialize current and next envelope parameters from current parameter values
+    currentMacroGateParam = parameters.getRawParameterValue("MacroGate")->load();
+    currentMacroShapeParam = parameters.getRawParameterValue("MacroShape")->load();
+    currentMacroSmoothParam = parameters.getRawParameterValue("MacroSmooth")->load();
+    currentNanoGateParam = parameters.getRawParameterValue("NanoGate")->load();
+    currentNanoShapeParam = parameters.getRawParameterValue("NanoShape")->load();
+    currentNanoSmoothParam = parameters.getRawParameterValue("NanoSmooth")->load();
+
+    nextMacroGateParam = currentMacroGateParam;
+    nextMacroShapeParam = currentMacroShapeParam;
+    nextMacroSmoothParam = currentMacroSmoothParam;
+    nextNanoGateParam = currentNanoGateParam;
+    nextNanoShapeParam = currentNanoShapeParam;
+    nextNanoSmoothParam = currentNanoSmoothParam;
 }
 
 void NanoStuttAudioProcessor::releaseResources()
@@ -149,6 +198,12 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     auto& params = parameters;
     float chance = params.getRawParameterValue("autoStutterChance")->load();
 
+    // Copy cached parameters for thread safety - ensures consistent values throughout buffer
+    auto cachedRegularWeights = regularRateWeights;
+    auto cachedNanoWeights = nanoRateWeights;
+    auto cachedQuantWeights = quantUnitWeights;
+    float cachedNanoBlend = nanoBlend;
+
     // TRANSPORT STATE DETECTION AND QUANTIZATION RESET
     if (!isPlaying) {
         // Transport is not playing, pass through dry audio and reset stutter state
@@ -161,22 +216,27 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
     // Check for transport restart or position jump (using RAW PPQ, before timing offset)
     bool transportJustStarted = !wasPlaying && isPlaying;
-    bool positionJumped = wasPlaying && std::abs(currentPpqPosition - lastPpqPosition) > 0.125; // Allow small timing variations
+    bool positionJumped = wasPlaying && std::abs(currentPpqPosition - lastPpqPosition) > THIRTY_SECOND_NOTE_PPQ; // Allow small timing variations
 
     if (transportJustStarted || positionJumped) {
         // Reset quantization alignment based on new PPQ position
         // Find the smallest active quantization unit to align to its grid
-        static const std::array<double, 4> quantUnits = {0.25, 0.125, 0.0625, 0.03125}; // 1/4, 1/8, 1/16, 1/32
+        static const std::array<double, 4> quantUnits = {
+            QUARTER_NOTE_PPQ,         // 1/4
+            THIRTY_SECOND_NOTE_PPQ * 2.0,  // 1/8
+            THIRTY_SECOND_NOTE_PPQ,        // 1/16
+            THIRTY_SECOND_NOTE_PPQ / 2.0   // 1/32
+        };
         static const std::array<int, 4> quantToNewBeatValues = {8, 4, 2, 1}; // 1/32nds per unit
 
         // Find smallest active quantization unit (highest frequency)
-        double activeQuantUnit = 0.125; // Default to 1/8th
+        double activeQuantUnit = THIRTY_SECOND_NOTE_PPQ * 2.0; // Default to 1/8th
         int activeQuantToNewBeat = 4;   // Default to 1/8th (4 x 1/32nds)
 
         // Debug: ensure we're finding the right quantization unit (commented out - working correctly)
 
-        for (size_t i = quantUnitWeights.size(); i > 0; --i) {
-            if (quantUnitWeights[i-1] > 0.0f) {
+        for (size_t i = cachedQuantWeights.size(); i > 0; --i) {
+            if (cachedQuantWeights[i-1] > 0.0f) {
                 activeQuantUnit = quantUnits[i-1];
                 activeQuantToNewBeat = quantToNewBeatValues[i-1];
                 break; // Found smallest (work backwards from 1/32 to 1/4)
@@ -191,7 +251,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         // Don't use modulo here - let quantCount reach quantToNewBeat and trigger events
         double adjustedPpqPosition = currentPpqPosition;
         // Note: timing offset will be applied later, but we need consistent alignment
-        double thirtySecondNotes = adjustedPpqPosition / 0.125;
+        double thirtySecondNotes = adjustedPpqPosition / THIRTY_SECOND_NOTE_PPQ;
         int totalThirtySeconds = static_cast<int>(std::floor(thirtySecondNotes));
         // Set quantCount to align with the quantization boundary
         // For 1/8th (quantToNewBeat=4): trigger should happen ON the boundary, not after
@@ -223,13 +283,13 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     bool autoStutter  = params.getRawParameterValue("autoStutterEnabled")->load();
     auto mixMode      = (int) params.getRawParameterValue("MixMode")->load();
 
-    auto nanoGateParam = params.getRawParameterValue("NanoGate")->load();
-    auto nanoShapeParam = params.getRawParameterValue("NanoShape")->load();
-    auto nanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
-    // Macro envelope parameters now handled via sample-and-hold mechanism
-    // auto macroGateParam = params.getRawParameterValue("MacroGate")->load();
-    // auto macroShapeParam = params.getRawParameterValue("MacroShape")->load();
-    // auto macroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
+    // Update smoothed real-time parameters (0.3ms smoothing for fast response, prevents bleeding across events)
+    smoothedNanoGate.setTargetValue(params.getRawParameterValue("NanoGate")->load());
+    smoothedNanoShape.setTargetValue(params.getRawParameterValue("NanoShape")->load());
+    smoothedNanoSmooth.setTargetValue(params.getRawParameterValue("NanoSmooth")->load());
+    smoothedMacroGate.setTargetValue(params.getRawParameterValue("MacroGate")->load());
+    smoothedMacroShape.setTargetValue(params.getRawParameterValue("MacroShape")->load());
+    smoothedMacroSmooth.setTargetValue(params.getRawParameterValue("MacroSmooth")->load());
 
     double ppqAtStartOfBlock = 0.0;
     double bpm = 120.0;
@@ -244,10 +304,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     // NOTE: Applied AFTER transport state tracking to avoid corrupting jump detection
     float timingOffsetMs = parameters.getRawParameterValue("TimingOffset")->load();
     double timingOffsetSamples = (timingOffsetMs / 1000.0) * sampleRate;
-    double timingOffsetPpq = (timingOffsetSamples / sampleRate) * (bpm / 60.0);
+    double timingOffsetPpq = (timingOffsetSamples / sampleRate) * (bpm / SECONDS_PER_MINUTE);
     ppqAtStartOfBlock += timingOffsetPpq;
 
-    double ppqPerSample = (bpm / 60.0) / sampleRate;
+    double ppqPerSample = (bpm / SECONDS_PER_MINUTE) / sampleRate;
     double quantUnit = 1.0 / std::pow(2.0, currentQuantIndex);
 
     // True stereo buffer capture - preserve stereo separation with circular buffer handling
@@ -275,15 +335,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             }
         }
     }
-    
-    auto calculateGain = [](float progress, float shapeParam) {
-        float mappedShape = (shapeParam - 0.5f) * 2.0f;
-        float curveAmount = std::abs(mappedShape);
-        float exponent = 1.0f + curveAmount * 4.0f;
-        float curvedGain = (mappedShape < 0.0f) ? std::pow(1.0f - progress, exponent) : std::pow(progress, exponent);
-        return juce::jmap(curveAmount, 0.0f, 1.0f, 1.0f, curvedGain);
-    };
-
 
     // =================================================================================
     // MAIN PROCESSING LOOP - THREE DECISION POINT ARCHITECTURE
@@ -307,7 +358,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         double currentPpq = ppqAtStartOfBlock + (i * ppqPerSample);
 
         // Fixed quantization logic: 1/32nd static beat detection
-        double staticQuantUnit = 0.125; // 1/32nd note
+        double staticQuantUnit = THIRTY_SECOND_NOTE_PPQ;
         
         
         // Calculate timing for all decision points
@@ -331,7 +382,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             parametersHeld = false; // Reset for next event
 
             // Add post-stutter silence if macro gate < 1.0
-            if (heldMacroGateParam < 1.0f) {
+            // Use CURRENT parameters (the event that just ended)
+            if (currentMacroGateParam < 1.0f) {
                 postStutterSilence = fadeLengthInSamples;
             }
         }
@@ -367,14 +419,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Reset quantCount based on current position, not arbitrarily to 0
                 // This prevents timing drift between consecutive stutters
                 double currentPpqInLoop = ppqAtStartOfBlock + (i * ppqPerSample);
-                double thirtySecondNotes = currentPpqInLoop / 0.125;
+                double thirtySecondNotes = currentPpqInLoop / THIRTY_SECOND_NOTE_PPQ;
                 int totalThirtySeconds = static_cast<int>(std::floor(thirtySecondNotes));
                 int currentBoundary = (totalThirtySeconds / quantToNewBeat) * quantToNewBeat;
                 quantCount = totalThirtySeconds - currentBoundary;
                 
                 // Calculate stutter event duration for this quantization unit
                 float gateScale = params.getRawParameterValue("autoStutterGate")->load();
-                double quantDurationSeconds = (240.0 / bpm) * staticQuantUnit * (quantToNewBeat-quantCount);
+                double quantDurationSeconds = (WHOLE_NOTE_SECONDS_MULTIPLIER / bpm) * staticQuantUnit * (quantToNewBeat-quantCount);
                 double gateDurationSeconds = juce::jlimit(quantDurationSeconds / 8.0, quantDurationSeconds, quantDurationSeconds * gateScale);
                 stutterEventLengthSamples = static_cast<int>(sampleRate * gateDurationSeconds);
                 
@@ -384,25 +436,26 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                     // Engage stutter with rate system selection
                     autoStutterActive = true;
-                    secondsPerWholeNote = 240.0 / bpm;
+                    secondsPerWholeNote = WHOLE_NOTE_SECONDS_MULTIPLIER / bpm;
 
                     // DECISION: Whether this stutter event should be reversed
                     float reverseChance = parameters.getRawParameterValue("reverseChance")->load();
                     currentStutterIsReversed = juce::Random::getSystemRandom().nextFloat() < reverseChance;
                     firstRepeatCyclePlayed = false;
                     cycleCompletionCounter = 0; // Reset cycle counter for new stutter event
+                    lastLoopPos = -1; // Reset cycle detection for new stutter event
 
-                    
+
                     // DECISION: Nano vs Rhythmical system selection
-                    bool useNano = juce::Random::getSystemRandom().nextFloat() < nanoBlend;
-                    int selectedIndex = useNano ? selectWeightedIndex(nanoRateWeights, 0) : selectWeightedIndex(regularRateWeights, 0);
+                    bool useNano = juce::Random::getSystemRandom().nextFloat() < cachedNanoBlend;
+                    int selectedIndex = useNano ? selectWeightedIndex(cachedNanoWeights, 0) : selectWeightedIndex(cachedRegularWeights, 0);
                     
                     // DECISION: Rate selection from chosen system
                     if (useNano) {
                         double currentNanoTune = params.getRawParameterValue("nanoTune")->load();
-                        double nanoBase = ((60.0 / bpm) / 16.0) / currentNanoTune;
+                        double nanoBase = ((SECONDS_PER_MINUTE / bpm) / 16.0) / currentNanoTune;
                         double sliceDuration = nanoBase / params.getRawParameterValue("nanoRatio_" + std::to_string(selectedIndex))->load();
-                        chosenDenominator = 240.0 / (bpm * sliceDuration);
+                        chosenDenominator = WHOLE_NOTE_SECONDS_MULTIPLIER / (bpm * sliceDuration);
                     } else {
                         chosenDenominator = regularDenominators[selectedIndex];
                     }
@@ -414,7 +467,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     macroEnvelopeCounter = 1; // Start at 1 to avoid zero-progress spikes
 
                     // Update macro envelope duration for this quantization unit
-                    double quantDurationSeconds = (60.0 / bpm) * staticQuantUnit * (quantToNewBeat-quantCount);
+                    double quantDurationSeconds = (SECONDS_PER_MINUTE / bpm) * staticQuantUnit * (quantToNewBeat-quantCount);
                     int quantUnitLengthSamples = static_cast<int>(sampleRate * quantDurationSeconds);
                     macroEnvelopeLengthInSamples = quantUnitLengthSamples;
 
@@ -422,7 +475,31 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     stutterPlayCounter = 0;
                     stutterWritePos = (writePos+i) % maxStutterLenSamples;
 
-                    
+                    // SWAP NEXT → CURRENT: New event starts, so next event parameters become current
+                    currentMacroGateParam = nextMacroGateParam;
+                    currentMacroShapeParam = nextMacroShapeParam;
+                    currentMacroSmoothParam = nextMacroSmoothParam;
+
+                    // Update smoothed held macroGate target NOW (at exact event start, not 2ms before)
+                    // This prevents the 3ms transition from bleeding into the end of the previous event
+                    smoothedHeldMacroGate.setTargetValue(currentMacroGateParam);
+
+                    // Sample ALL nano envelope parameters for first cycle of new event
+                    nextNanoGateParam = params.getRawParameterValue("NanoGate")->load();
+                    nextNanoShapeParam = params.getRawParameterValue("NanoShape")->load();
+                    nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
+
+                    // Nano parameters become current immediately (first cycle of new event)
+                    currentNanoGateParam = nextNanoGateParam;
+                    currentNanoShapeParam = nextNanoShapeParam;
+                    currentNanoSmoothParam = nextNanoSmoothParam;
+                    smoothedHeldNanoGate.setTargetValue(currentNanoGateParam);
+
+                    // Pre-calculate nano envelope length for first cycle
+                    float nanoGateMultiplier = NANO_GATE_MIN + currentNanoGateParam * NANO_GATE_RANGE;
+                    int loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate + 1), 1, maxStutterLenSamples);
+                    heldNanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
+
                 }
                 else autoStutterActive = false;
                 
@@ -433,9 +510,9 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 } else {
                     stutterIsScheduled = false; // Explicitly set to false when not scheduling
                 }
-                
+
                 // DECIDE NEXT QUANTIZATION UNIT for future events
-                nextQuantIndex = selectWeightedIndex(quantUnitWeights, 1); // Default to 1/8
+                nextQuantIndex = selectWeightedIndex(cachedQuantWeights, 1); // Default to 1/8
 
                 
             }
@@ -447,21 +524,21 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         // Sample macro envelope controls 2ms before ANY stutter event starts
         // This ensures the next stutter event uses fresh parameter values
         // =============================================================================
-        int twoMsInSamples = static_cast<int>(sampleRate * 0.002); // 2ms
-        static bool parametersSampledForUpcomingEvent = false; // Prevent multiple sampling for same upcoming event
+        int twoMsInSamples = static_cast<int>(sampleRate * (PARAMETER_SAMPLE_ADVANCE_MS / 1000.0));
+        // parametersSampledForUpcomingEvent is now a member variable (prevent multiple sampling for same upcoming event)
 
         // Check if a stutter event will start soon (using corrected quantization boundary logic)
         bool stutterStartingSoon = (stutterIsScheduled && quantCount >= std::max(1, quantToNewBeat - 1) && samplesToNextBeat <= twoMsInSamples);
 
         if (stutterStartingSoon) {
             if (!parametersSampledForUpcomingEvent) {
-                // Sample parameters for the upcoming stutter event
-                heldMacroGateParam = params.getRawParameterValue("MacroGate")->load();
-                heldMacroShapeParam = params.getRawParameterValue("MacroShape")->load();
-                heldMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
-                heldNanoGateParam = params.getRawParameterValue("NanoGate")->load();
-                heldNanoShapeParam = params.getRawParameterValue("NanoShape")->load();
-                heldNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
+                // Sample ALL macro envelope parameters into NEXT event parameters
+                // These will be swapped to current when the new event starts
+                // This prevents automation bleeding - new values only apply to upcoming events
+                nextMacroGateParam = params.getRawParameterValue("MacroGate")->load();
+                nextMacroShapeParam = params.getRawParameterValue("MacroShape")->load();
+                nextMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
+
                 parametersHeld = true;
                 parametersSampledForUpcomingEvent = true; // Prevent re-sampling for same event
 
@@ -473,7 +550,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
         // INITIALIZE STUTTER EVENT when triggered (SIMPLIFIED: auto-stutter only)
         // bool isStutteringEvent = autoStutterActive || *params.getRawParameterValue("stutterOn"); // MANUAL STUTTER DISABLED
-        static bool stutterInitialized = false;
+        // stutterInitialized is now a member variable
 
         // Reset initialization flag when not active
         if (!autoStutterActive) {
@@ -489,14 +566,15 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
             // No need for universal countdown - using autoStutterRemainingSamples only
 
-            // ENSURE PARAMETERS ARE HELD - if not already sampled, sample them now
+            // ENSURE macro envelope parameters ARE HELD - if not already sampled, sample them now
             if (!parametersHeld) {
-                heldMacroGateParam = params.getRawParameterValue("MacroGate")->load();
-                heldMacroShapeParam = params.getRawParameterValue("MacroShape")->load();
-                heldMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
-                heldNanoGateParam = params.getRawParameterValue("NanoGate")->load();
-                heldNanoShapeParam = params.getRawParameterValue("NanoShape")->load();
-                heldNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
+                nextMacroGateParam = params.getRawParameterValue("MacroGate")->load();
+                nextMacroShapeParam = params.getRawParameterValue("MacroShape")->load();
+                nextMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
+
+                // Update smoothed held gate parameter
+                smoothedHeldMacroGate.setTargetValue(nextMacroGateParam);
+
                 parametersHeld = true;
             }
 
@@ -538,21 +616,22 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
             } else if (stutterIsScheduled && autoStutterActive) {
                 // Stutter→Stutter: dry fades from 0 to firstSampleGain
-                int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * heldMacroGateParam));
+                // Use NEXT parameters because we're calculating what we're fading TO
+                int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * nextMacroGateParam));
                 float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
-                float nextFirstSampleMacroGain = calculateGain(firstSampleProgress, heldMacroShapeParam);
+                float nextFirstSampleMacroGain = calculateEnvelopeGain(firstSampleProgress, nextMacroShapeParam);
 
-                float macroSmoothAmount = heldMacroSmoothParam * 0.3f;
+                float macroSmoothAmount = nextMacroSmoothParam * MACRO_SMOOTH_SCALE;
                 if (macroSmoothAmount > 0.0f && firstSampleProgress < macroSmoothAmount) {
                     float fadeInGain = firstSampleProgress / macroSmoothAmount;
                     nextFirstSampleMacroGain *= fadeInGain;
                 }
 
-                // Calculate nano envelope gain for first sample (matching main processing logic)
-                float nanoGateMultiplier = 0.25f + heldNanoGateParam * 0.75f;
+                // Calculate nano envelope gain for first sample (using NEXT parameters - what we're fading to)
+                float nanoGateMultiplier = NANO_GATE_MIN + smoothedHeldNanoGate.getNextValue() * NANO_GATE_RANGE;
                 int nanoEnvelopeLengthSamples = std::max(1, static_cast<int>(stutterEventLengthSamples / chosenDenominator * nanoGateMultiplier));
                 float firstSampleNanoProgress = 1.0f / (float)nanoEnvelopeLengthSamples;
-                float nextFirstSampleNanoGain = calculateGain(firstSampleNanoProgress, heldNanoShapeParam);
+                float nextFirstSampleNanoGain = calculateEnvelopeGain(firstSampleNanoProgress, nextNanoShapeParam);
 
                 // Combine macro and nano gains for accurate first sample gain
                 float nextFirstSampleGain = nextFirstSampleMacroGain * nextFirstSampleNanoGain;
@@ -564,21 +643,22 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
             } else if (stutterIsScheduled && !autoStutterActive) {
                 // Dry→Stutter: dry fades from 1 to firstSampleGain
-                int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * heldMacroGateParam));
+                // Use NEXT parameters because we're calculating what we're fading TO
+                int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * nextMacroGateParam));
                 float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
-                float nextFirstSampleMacroGain = calculateGain(firstSampleProgress, heldMacroShapeParam);
+                float nextFirstSampleMacroGain = calculateEnvelopeGain(firstSampleProgress, nextMacroShapeParam);
 
-                float macroSmoothAmount = heldMacroSmoothParam * 0.3f;
+                float macroSmoothAmount = nextMacroSmoothParam * MACRO_SMOOTH_SCALE;
                 if (macroSmoothAmount > 0.0f && firstSampleProgress < macroSmoothAmount) {
                     float fadeInGain = firstSampleProgress / macroSmoothAmount;
                     nextFirstSampleMacroGain *= fadeInGain;
                 }
 
-                // Calculate nano envelope gain for first sample (matching main processing logic)
-                float nanoGateMultiplier = 0.25f + heldNanoGateParam * 0.75f;
+                // Calculate nano envelope gain for first sample (using NEXT parameters - what we're fading to)
+                float nanoGateMultiplier = NANO_GATE_MIN + smoothedHeldNanoGate.getNextValue() * NANO_GATE_RANGE;
                 int nanoEnvelopeLengthSamples = std::max(1, static_cast<int>(stutterEventLengthSamples / chosenDenominator * nanoGateMultiplier));
                 float firstSampleNanoProgress = 1.0f / (float)nanoEnvelopeLengthSamples;
-                float nextFirstSampleNanoGain = calculateGain(firstSampleNanoProgress, heldNanoShapeParam);
+                float nextFirstSampleNanoGain = calculateEnvelopeGain(firstSampleNanoProgress, nextNanoShapeParam);
 
                 // Combine macro and nano gains for accurate first sample gain
                 float nextFirstSampleGain = nextFirstSampleMacroGain * nextFirstSampleNanoGain;
@@ -616,6 +696,20 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         int nanoFadeLen = 0;
         float nanoFadeProgress = 0.0f;
 
+        // Pre-calculate all smoothed parameters ONCE per sample (before channel loop)
+        // Real-time parameters (always advance smoothly)
+        float smoothNanoGate = smoothedNanoGate.getNextValue();
+        float smoothNanoShape = smoothedNanoShape.getNextValue();
+        float smoothNanoSmooth = smoothedNanoSmooth.getNextValue();
+
+        // Advance macro smoothed parameters (needed for proper ramp behavior, even if not used directly)
+        smoothedMacroShape.getNextValue();
+        smoothedMacroSmooth.getNextValue();
+
+        // Held gate parameters (advance during events/cycles to smooth transitions)
+        float smoothHeldMacroGate = smoothedHeldMacroGate.getNextValue();
+        float smoothHeldNanoGate = smoothedHeldNanoGate.getNextValue();
+
         if (autoStutterActive)
         {
             // Calculate stutter loop parameters
@@ -623,6 +717,25 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
             // Handle reverse playback logic
             loopPos = stutterPlayCounter % (loopLen);
+
+            // DETECT NEW CYCLE (wrap-around) and sample parameters for next cycle
+            if (loopPos < lastLoopPos) {
+                // New cycle detected - sample parameters for NEXT cycle
+                nextNanoGateParam = smoothNanoGate;
+                nextNanoShapeParam = smoothNanoShape;
+                nextNanoSmoothParam = smoothNanoSmooth;
+
+                // Immediately swap to current (new cycle starts now)
+                currentNanoGateParam = nextNanoGateParam;
+                currentNanoShapeParam = nextNanoShapeParam;
+                currentNanoSmoothParam = nextNanoSmoothParam;
+                smoothedHeldNanoGate.setTargetValue(currentNanoGateParam);
+
+                // Pre-calculate nano envelope length for this cycle
+                float nanoGateMultiplier = NANO_GATE_MIN + currentNanoGateParam * NANO_GATE_RANGE;
+                heldNanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
+            }
+            lastLoopPos = loopPos;
 
             // Note: First cycle completion detection moved to counter update section
 
@@ -637,9 +750,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
             }
 
-            // Pre-calculate nano smooth parameters
-            nanoFadeLen = static_cast<int>((float)loopLen * nanoSmoothParam * 0.25f);
-            shouldApplyNanoSmooth = (nanoFadeLen > 1 && loopPos >= loopLen - nanoFadeLen && nanoSmoothParam > 0.0f);
+            nanoFadeLen = static_cast<int>((float)loopLen * currentNanoSmoothParam * NANO_SMOOTH_SCALE);
+            shouldApplyNanoSmooth = (nanoFadeLen > 1 && loopPos >= loopLen - nanoFadeLen && currentNanoSmoothParam > 0.0f);
 
             // Skip nano smooth at end of first forward cycle when reverse is enabled
             // because the reversed cycle starts at the exact same sample position
@@ -668,17 +780,25 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             {
 
                 // NANO ENVELOPE (controls internal loop behavior)
-                float nanoGateMultiplier = 0.25f + nanoGateParam * 0.75f;
-                nanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
-                float nanoProgress = (float)loopPos / (float)nanoEnvelopeLengthInSamples;
-                float nanoGain = calculateGain(nanoProgress, nanoShapeParam);;
+                // Use smoothed nanoShape for click-free parameter changes within cycles
+                // For reversed playback (after first cycle), reverse the envelope too for seamless transition
+                float nanoProgress;
+                if (currentStutterIsReversed && firstRepeatCyclePlayed) {
+                    // Reversed playback: envelope runs backwards (1.0 → 0.0 as loopPos increases 0 → loopLen-1)
+                    nanoProgress = 1.0f - ((float)loopPos / (float)heldNanoEnvelopeLengthInSamples);
+                } else {
+                    // Forward playback: envelope runs forward (0.0 → 1.0)
+                    nanoProgress = (float)loopPos / (float)heldNanoEnvelopeLengthInSamples;
+                }
+                // Use smoothed nanoShape directly to prevent clicks from rapid parameter changes
+                float nanoGain = calculateEnvelopeGain(nanoProgress, smoothNanoShape);
 
-                if (loopPos < nanoEnvelopeLengthInSamples) {
-                    // Check if we're in fade-out region (1ms before effective gate end)
+                if (loopPos < heldNanoEnvelopeLengthInSamples) {
+                    // Check if we're in fade-out region (constant 0.1ms fade)
                     // Only apply fade-out when nanoGate is not at maximum (1.0)
-                    if (nanoGateParam < 1.0f) {
-                        int fadeOutLen = static_cast<int>(sampleRate * 0.0001f); // 1ms fade-out
-                        int fadeOutStart = std::max(0, nanoEnvelopeLengthInSamples - fadeOutLen);
+                    if (smoothHeldNanoGate < 1.0f) {
+                        int fadeOutLen = static_cast<int>(sampleRate * NANO_FADE_OUT_SECONDS);
+                        int fadeOutStart = std::max(0, heldNanoEnvelopeLengthInSamples - fadeOutLen);
 
                         if (loopPos >= fadeOutStart && fadeOutLen > 0) {
                             // We're in the fade-out region
@@ -690,15 +810,15 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     nanoGain = 0.0f; // Silent after effective gate
                 }
 
-                // MACRO ENVELOPE (controls overall event shape - uses held parameters)
-                // MacroGate scales the envelope length (0.25 = 25% of total length, 1.0 = 100% of length)
-                float macroGateScale = juce::jlimit(0.25f, 1.0f, heldMacroGateParam);
+                // MACRO ENVELOPE (controls overall event shape)
+                // Use CURRENT parameters (per event) for stable, event-locked envelope behavior
+                float macroGateScale = juce::jlimit(MACRO_GATE_MIN, 1.0f, smoothHeldMacroGate);
                 int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * macroGateScale));
                 float macroProgress = juce::jlimit(0.0f, 1.0f, (float)macroEnvelopeCounter / (float)effectiveMacroLength);
-                float macroGain = calculateGain(macroProgress, heldMacroShapeParam);
-                
-                // Apply macro smooth fades (using held parameters)
-                float macroSmoothAmount = heldMacroSmoothParam * 0.3f;
+                float macroGain = calculateEnvelopeGain(macroProgress, currentMacroShapeParam);
+
+                // Apply macro smooth fades (using current parameters for event-locked behavior)
+                float macroSmoothAmount = currentMacroSmoothParam * MACRO_SMOOTH_SCALE;
                 if (macroSmoothAmount > 0.0f) {
                     if (macroProgress < macroSmoothAmount) {
                         macroGain *= macroProgress / macroSmoothAmount;
@@ -708,8 +828,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 }
 
                 if (macroEnvelopeCounter <= effectiveMacroLength) {
-                    // Check if we're in fade-out region (1ms before effective gate end)
-                    int fadeOutLen = static_cast<int>(sampleRate * 0.001f); // 1ms fade-out
+                    // Check if we're in fade-out region (constant 1ms fade)
+                    int fadeOutLen = static_cast<int>(sampleRate * FADE_DURATION_SECONDS);
                     int fadeOutStart = std::max(1, effectiveMacroLength - fadeOutLen);
 
                     if (macroEnvelopeCounter >= fadeOutStart && fadeOutLen > 0) {
@@ -729,12 +849,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 wetSample = stutterBuffer.getSample(ch, readIndex) * macroGain * nanoGain;
 
 
-                // Apply nano smooth (crossfade between loop repetitions) - using pre-calculated values
+                // Apply nano smooth (crossfade between loop repetitions) - using smoothed nanoShape
                 if (shouldApplyNanoSmooth)
                 {
-                    // Calculate nano gain for loop start position (beginning of nano envelope)
-                    float loopStartNanoProgress = 0.0f; // Beginning of loop = beginning of nano envelope
-                    float loopStartNanoGain = calculateGain(loopStartNanoProgress, nanoShapeParam);
+                    // Calculate nano gain for loop start position
+                    // For reversed playback: loop starts at envelope END (progress = 1.0)
+                    // For forward playback: loop starts at envelope START (progress = 0.0)
+                    float loopStartNanoProgress = (currentStutterIsReversed && firstRepeatCyclePlayed) ? 1.0f : 0.0f;
+                    float loopStartNanoGain = calculateEnvelopeGain(loopStartNanoProgress, smoothNanoShape);
 
                     float incomingSample = stutterBuffer.getSample(ch, startOfLoopReadIndex) * macroGain * loopStartNanoGain;
                     wetSample = wetSample * (1.0f - nanoFadeProgress) + incomingSample * nanoFadeProgress;
@@ -798,7 +920,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     }
     writePos = (writePos + numSamples) % maxStutterLenSamples;
 
-    // Apply waveshaping using JUCE DSP with drive and gain compensation
+    // Apply waveshaping using JUCE DSP ProcessorChain
     auto waveshapeAlgorithm = parameters.getRawParameterValue("WaveshapeAlgorithm")->load();
     auto driveAmount = parameters.getRawParameterValue("Drive")->load();
     auto gainCompensation = parameters.getRawParameterValue("GainCompensation")->load();
@@ -808,14 +930,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         // Update waveshaper function and gains
         updateWaveshaperFunction(static_cast<int>(waveshapeAlgorithm), driveAmount, gainCompensation > 0.5f);
 
-        // Create audio block for DSP processing
-        juce::dsp::AudioBlock<float> audioBlock(buffer);
-        juce::dsp::ProcessContextReplacing<float> context(audioBlock);
-
-        // Process through the DSP chain: Input Gain -> WaveShaper -> Output Gain
-        waveshaperInputGain.process(context);
-        waveShaper.process(context);
-        waveshaperOutputGain.process(context);
+        // Process through the DSP chain
+        auto audioBlock = juce::dsp::AudioBlock<float>(buffer);
+        auto context = juce::dsp::ProcessContextReplacing<float>(audioBlock);
+        waveshaperChain.process(context);
     }
 }
 
@@ -825,16 +943,21 @@ void NanoStuttAudioProcessor::updateWaveshaperFunction(int algorithm, float driv
     float inputGain = 1.0f + (drive * 9.0f); // 1.0x to 10.0x drive range
     float outputGain = 1.0f;
 
+    // Get references to chain processors
+    auto& inputGainProcessor = waveshaperChain.get<inputGainIndex>();
+    auto& waveShaperProcessor = waveshaperChain.get<waveShaperIndex>();
+    auto& outputGainProcessor = waveshaperChain.get<outputGainIndex>();
+
     // Set waveshaper function and calculate compensation gains
     switch (algorithm)
     {
         case 0: // None
             inputGain = 1.0f;
-            waveShaper.functionToUse = [](float x) { return x; };
+            waveShaperProcessor.functionToUse = [](float x) { return x; };
             break;
 
         case 1: // Soft Clip
-            waveShaper.functionToUse = [](float x) {
+            waveShaperProcessor.functionToUse = [](float x) {
                 return juce::jlimit(-1.0f, 1.0f, x);
             };
             // Subtle compensation for soft clipping
@@ -843,7 +966,7 @@ void NanoStuttAudioProcessor::updateWaveshaperFunction(int algorithm, float driv
             break;
 
         case 2: // Tanh
-            waveShaper.functionToUse = [](float x) {
+            waveShaperProcessor.functionToUse = [](float x) {
                 return std::tanh(x);
             };
             // Subtle compensation for tanh compression
@@ -852,7 +975,7 @@ void NanoStuttAudioProcessor::updateWaveshaperFunction(int algorithm, float driv
             break;
 
         case 3: // Hard Clip
-            waveShaper.functionToUse = [](float x) {
+            waveShaperProcessor.functionToUse = [](float x) {
                 return juce::jlimit(-1.0f, 1.0f, x);
             };
             // Subtle compensation for hard clipping
@@ -861,7 +984,7 @@ void NanoStuttAudioProcessor::updateWaveshaperFunction(int algorithm, float driv
             break;
 
         case 4: // Tube
-            waveShaper.functionToUse = [](float x) {
+            waveShaperProcessor.functionToUse = [](float x) {
                 return x / (1.0f + std::abs(x));
             };
             // Slightly stronger compensation for tube's asymptotic behavior
@@ -870,7 +993,7 @@ void NanoStuttAudioProcessor::updateWaveshaperFunction(int algorithm, float driv
             break;
 
         case 5: // Wavefolding
-            waveShaper.functionToUse = [](float x) {
+            waveShaperProcessor.functionToUse = [](float x) {
                 // Proper wavefolding - strict bounds maintenance within [-1, 1]
                 // Use absolute value and sign tracking for correct reflection
                 float sign = x >= 0.0f ? 1.0f : -1.0f;
@@ -893,9 +1016,9 @@ void NanoStuttAudioProcessor::updateWaveshaperFunction(int algorithm, float driv
             break;
     }
 
-    // Set the gain values
-    waveshaperInputGain.setGainLinear(inputGain);
-    waveshaperOutputGain.setGainLinear(outputGain);
+    // Set the gain values using the chain
+    inputGainProcessor.setGainLinear(inputGain);
+    outputGainProcessor.setGainLinear(outputGain);
 }
 
 
@@ -913,10 +1036,18 @@ juce::AudioProcessorEditor* NanoStuttAudioProcessor::createEditor()
 //==============================================================================
 void NanoStuttAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
+    // Serialize all parameters using AudioProcessorValueTreeState's built-in serialization
+    auto state = parameters.copyState();
+    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    copyXmlToBinary(*xml, destData);
 }
 
 void NanoStuttAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
+    // Restore all parameters from saved state
+    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
+    if (xml != nullptr && xml->hasTagName(parameters.state.getType()))
+        parameters.replaceState(juce::ValueTree::fromXml(*xml));
 }
 
 //==============================================================================

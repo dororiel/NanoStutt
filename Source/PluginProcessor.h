@@ -14,9 +14,6 @@
 //==============================================================================
 /**
 */
-struct StutterState;
-
-
 class NanoStuttAudioProcessor  : public juce::AudioProcessor,
                                  public juce::AudioProcessorValueTreeState::Listener
 
@@ -58,7 +55,42 @@ public:
     //==============================================================================
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
-    
+
+    // ==== Public Accessors ====
+    juce::AudioProcessorValueTreeState& getParameters() { return parameters; }
+    const juce::AudioBuffer<float>& getStutterBuffer() const { return stutterBuffer; }
+
+    void setManualStutterRate(int rate) { manualStutterRateDenominator = rate; }
+    void setManualStutterTriggered(bool triggered) { manualStutterTriggered = triggered; }
+    void setAutoStutterActive(bool active) { autoStutterActive = active; }
+
+private:
+    // ==== Timing Constants ====
+    static constexpr double FADE_DURATION_MS = 1.0;
+    static constexpr double FADE_DURATION_SECONDS = FADE_DURATION_MS / 1000.0;
+    static constexpr double PARAMETER_SAMPLE_ADVANCE_MS = 2.0;
+    static constexpr double NANO_FADE_OUT_MS = 0.1;
+    static constexpr double NANO_FADE_OUT_SECONDS = NANO_FADE_OUT_MS / 1000.0;
+
+    // Quantization Constants
+    static constexpr double THIRTY_SECOND_NOTE_PPQ = 0.125;
+    static constexpr double QUARTER_NOTE_PPQ = 1.0;
+
+    // Musical Constants
+    static constexpr double SECONDS_PER_MINUTE = 60.0;
+    static constexpr double WHOLE_NOTE_QUARTERS = 4.0;
+    static constexpr double WHOLE_NOTE_SECONDS_MULTIPLIER = 240.0; // (WHOLE_NOTE_QUARTERS * SECONDS_PER_MINUTE)
+
+    // Envelope Constants
+    static constexpr float NANO_GATE_MIN = 0.25f;
+    static constexpr float NANO_GATE_RANGE = 0.75f;
+    static constexpr float MACRO_GATE_MIN = 0.25f;
+    static constexpr float MACRO_SMOOTH_SCALE = 0.3f;
+    static constexpr float NANO_SMOOTH_SCALE = 0.25f;
+
+    // Buffer Constants
+    static constexpr double MAX_STUTTER_BUFFER_SECONDS = 3.0;
+
     // ==== Stutter variables ====
     juce::AudioBuffer<float> stutterBuffer;
     juce::AudioProcessorValueTreeState parameters;
@@ -80,7 +112,7 @@ public:
     int                       manualStutterRateDenominator = -1;
     bool                      manualStutterTriggered = false;
     int                       quantCount = 0;
-    std::atomic<int>          stutterWritePos = 0; // Tracks where to record in the stutterBuffer
+    int                       stutterWritePos = 0; // Tracks where to record in the stutterBuffer (audio thread only)
     int                       quantToNewBeat = 4;
     // ==== New Fade & State Logic ====
     int fadeLengthInSamples = 0;
@@ -103,13 +135,23 @@ public:
     std::array<float, 4> quantUnitWeights {{ 0.0f }};
     float nanoBlend = 0.0f;
 
-    // Sample-and-hold envelope parameters (sampled 1ms before stutter events)
-    float heldMacroGateParam = 1.0f;
-    float heldMacroShapeParam = 0.5f;
-    float heldMacroSmoothParam = 0.0f;
-    float heldNanoGateParam = 1.0f;
-    float heldNanoShapeParam = 0.5f;
-    float heldNanoSmoothParam = 0.0f;
+    // Sample-and-hold envelope parameters (sampled to keep event-locked behavior)
+    // Current event parameters - used throughout the active stutter event
+    float currentMacroGateParam = 1.0f;
+    float currentMacroShapeParam = 0.5f;
+    float currentMacroSmoothParam = 0.0f;
+    float currentNanoGateParam = 1.0f;
+    float currentNanoShapeParam = 0.5f;
+    float currentNanoSmoothParam = 0.0f;
+
+    // Next event parameters - sampled 2ms before event end for upcoming event
+    float nextMacroGateParam = 1.0f;
+    float nextMacroShapeParam = 0.5f;
+    float nextMacroSmoothParam = 0.0f;
+    float nextNanoGateParam = 1.0f;
+    float nextNanoShapeParam = 0.5f;
+    float nextNanoSmoothParam = 0.0f;
+
     bool parametersHeld = false;
     
     // Dynamic quantization
@@ -121,13 +163,33 @@ public:
     bool wasPlaying = false;
     double lastPpqPosition = -1.0;
 
+    // State flags for processBlock (moved from static variables)
+    bool parametersSampledForUpcomingEvent = false;
+    bool stutterInitialized = false;
+
     // Manual timing offset for master track delay compensation
     std::atomic<float>* timingOffsetParam = nullptr;
+
+    // Smoothed envelope parameters (0.3ms ramp time for fast response, prevents bleeding across events)
+    juce::LinearSmoothedValue<float> smoothedNanoGate;
+    juce::LinearSmoothedValue<float> smoothedNanoShape;
+    juce::LinearSmoothedValue<float> smoothedNanoSmooth;
+    juce::LinearSmoothedValue<float> smoothedMacroGate;
+    juce::LinearSmoothedValue<float> smoothedMacroShape;
+    juce::LinearSmoothedValue<float> smoothedMacroSmooth;
+
+    // Smoothed held gate parameters (0.3ms ramp time for stable lengths)
+    juce::LinearSmoothedValue<float> smoothedHeldNanoGate;   // Per cycle
+    juce::LinearSmoothedValue<float> smoothedHeldMacroGate;  // Per event
 
     // Reverse playback control
     bool currentStutterIsReversed = false;      // Whether current stutter event should be reversed
     bool firstRepeatCyclePlayed = false;        // Track if first repeat cycle has been played
     int cycleCompletionCounter = 0;             // Track how many cycles have been completed
+
+    // Cycle detection for nanoGate holding
+    int lastLoopPos = -1;                       // Track loop position to detect wrap-around
+    int heldNanoEnvelopeLengthInSamples = 0;    // Pre-calculated nano envelope length per cycle
 
     // Ratio/denominator lookup
     static constexpr std::array<int, 8> regularDenominators {{ 4, 3, 6, 8, 12, 16, 24, 32 }};
@@ -149,8 +211,6 @@ public:
     void parameterChanged(const juce::String& parameterID, float newValue) override;
     void updateWaveshaperFunction(int algorithm, float drive, bool gainCompensation);
 
-    void setManualStutterRate(int rate) { manualStutterRateDenominator = rate; }
-
     // Weighted probability selection utility
     template<typename Container>
     static int selectWeightedIndex(const Container& weights, int defaultIndex = 0)
@@ -171,10 +231,33 @@ public:
         return idx;
     }
 
-    // JUCE DSP Objects for waveshaping
-    juce::dsp::Gain<float> waveshaperInputGain;
-    juce::dsp::Gain<float> waveshaperOutputGain;
-    juce::dsp::WaveShaper<float> waveShaper;
+    // Envelope gain calculation utility
+    static inline float calculateEnvelopeGain(float progress, float shapeParam)
+    {
+        float mappedShape = (shapeParam - 0.5f) * 2.0f;
+        float curveAmount = std::abs(mappedShape);
+        float exponent = 1.0f + curveAmount * 4.0f;
+        float curvedGain = (mappedShape < 0.0f)
+            ? std::pow(1.0f - progress, exponent)
+            : std::pow(progress, exponent);
+        return juce::jmap(curveAmount, 0.0f, 1.0f, 1.0f, curvedGain);
+    }
+
+    // JUCE DSP ProcessorChain for waveshaping
+    enum
+    {
+        inputGainIndex,
+        waveShaperIndex,
+        outputGainIndex
+    };
+
+    using WaveshaperChain = juce::dsp::ProcessorChain<
+        juce::dsp::Gain<float>,      // Input gain
+        juce::dsp::WaveShaper<float>, // Waveshaper
+        juce::dsp::Gain<float>       // Output gain
+    >;
+
+    WaveshaperChain waveshaperChain;
     juce::dsp::ProcessSpec dspSpec;
 
 private:
