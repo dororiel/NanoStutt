@@ -12,6 +12,7 @@
             file="Source/PluginEditor.cpp"/>
       <FILE id="LVQvnM" name="PluginEditor.h" compile="0" resource="0" file="Source/PluginEditor.h"/>
     </GROUP>
+    <FILE id="vO50w8" name="DualSlider.h" compile="0" resource="0" file="Source/DualSlider.h"/>
   </MAINGROUP>
   <MODULES>
     <MODULE id="juce_audio_basics" showAllCode="1" useLocalCopy="0" useGlobalPath="0"/>

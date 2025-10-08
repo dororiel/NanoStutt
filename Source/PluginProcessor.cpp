@@ -535,8 +535,49 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Sample ALL macro envelope parameters into NEXT event parameters
                 // These will be swapped to current when the new event starts
                 // This prevents automation bleeding - new values only apply to upcoming events
-                nextMacroGateParam = params.getRawParameterValue("MacroGate")->load();
-                nextMacroShapeParam = params.getRawParameterValue("MacroShape")->load();
+
+                // Sample MacroGate with randomization
+                float macroGateBase = params.getRawParameterValue("MacroGate")->load();
+                float macroGateRandom = params.getRawParameterValue("MacroGateRandom")->load();
+                bool macroGateBipolar = params.getRawParameterValue("MacroGateRandomBipolar")->load() > 0.5f;
+                float gateRandomOffset;
+                if (macroGateBipolar)
+                {
+                    // Bipolar: ±random (symmetric around center)
+                    gateRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(macroGateRandom);
+                }
+                else
+                {
+                    // Unipolar: + or - random (based on sign)
+                    // If positive: randomize 0 to +value, if negative: randomize -value to 0
+                    if (macroGateRandom > 0.0f)
+                        gateRandomOffset = juce::Random::getSystemRandom().nextFloat() * macroGateRandom;
+                    else
+                        gateRandomOffset = juce::Random::getSystemRandom().nextFloat() * macroGateRandom;
+                }
+                nextMacroGateParam = juce::jlimit(0.25f, 1.0f, macroGateBase + gateRandomOffset);
+
+                // Sample MacroShape with randomization
+                float macroShapeBase = params.getRawParameterValue("MacroShape")->load();
+                float macroShapeRandom = params.getRawParameterValue("MacroShapeRandom")->load();
+                bool macroShapeBipolar = params.getRawParameterValue("MacroShapeRandomBipolar")->load() > 0.5f;
+                float shapeRandomOffset;
+                if (macroShapeBipolar)
+                {
+                    // Bipolar: ±random (symmetric around center)
+                    shapeRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(macroShapeRandom);
+                }
+                else
+                {
+                    // Unipolar: + or - random (based on sign)
+                    // If positive: randomize 0 to +value, if negative: randomize -value to 0
+                    if (macroShapeRandom > 0.0f)
+                        shapeRandomOffset = juce::Random::getSystemRandom().nextFloat() * macroShapeRandom;
+                    else
+                        shapeRandomOffset = juce::Random::getSystemRandom().nextFloat() * macroShapeRandom;
+                }
+                nextMacroShapeParam = juce::jlimit(0.0f, 1.0f, macroShapeBase + shapeRandomOffset);
+
                 nextMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
 
                 parametersHeld = true;
@@ -568,8 +609,48 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
             // ENSURE macro envelope parameters ARE HELD - if not already sampled, sample them now
             if (!parametersHeld) {
-                nextMacroGateParam = params.getRawParameterValue("MacroGate")->load();
-                nextMacroShapeParam = params.getRawParameterValue("MacroShape")->load();
+                // Sample MacroGate with randomization
+                float macroGateBase = params.getRawParameterValue("MacroGate")->load();
+                float macroGateRandom = params.getRawParameterValue("MacroGateRandom")->load();
+                bool macroGateBipolar = params.getRawParameterValue("MacroGateRandomBipolar")->load() > 0.5f;
+                float gateRandomOffset;
+                if (macroGateBipolar)
+                {
+                    // Bipolar: ±random (symmetric around center)
+                    gateRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(macroGateRandom);
+                }
+                else
+                {
+                    // Unipolar: + or - random (based on sign)
+                    // If positive: randomize 0 to +value, if negative: randomize -value to 0
+                    if (macroGateRandom > 0.0f)
+                        gateRandomOffset = juce::Random::getSystemRandom().nextFloat() * macroGateRandom;
+                    else
+                        gateRandomOffset = juce::Random::getSystemRandom().nextFloat() * macroGateRandom;
+                }
+                nextMacroGateParam = juce::jlimit(0.25f, 1.0f, macroGateBase + gateRandomOffset);
+
+                // Sample MacroShape with randomization
+                float macroShapeBase = params.getRawParameterValue("MacroShape")->load();
+                float macroShapeRandom = params.getRawParameterValue("MacroShapeRandom")->load();
+                bool macroShapeBipolar = params.getRawParameterValue("MacroShapeRandomBipolar")->load() > 0.5f;
+                float shapeRandomOffset;
+                if (macroShapeBipolar)
+                {
+                    // Bipolar: ±random (symmetric around center)
+                    shapeRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(macroShapeRandom);
+                }
+                else
+                {
+                    // Unipolar: + or - random (based on sign)
+                    // If positive: randomize 0 to +value, if negative: randomize -value to 0
+                    if (macroShapeRandom > 0.0f)
+                        shapeRandomOffset = juce::Random::getSystemRandom().nextFloat() * macroShapeRandom;
+                    else
+                        shapeRandomOffset = juce::Random::getSystemRandom().nextFloat() * macroShapeRandom;
+                }
+                nextMacroShapeParam = juce::jlimit(0.0f, 1.0f, macroShapeBase + shapeRandomOffset);
+
                 nextMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
 
                 // Update smoothed held gate parameter
@@ -1108,6 +1189,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroGate", 1), "Macro Gate", 0.25f, 1.0f, 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroShape", 1), "Macro Shape", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroSmooth", 1), "Macro Smooth", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroGateRandom", 1), "Macro Gate Random", -1.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroShapeRandom", 1), "Macro Shape Random", -1.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("MacroGateRandomBipolar", 1), "Macro Gate Random Bipolar", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("MacroShapeRandomBipolar", 1), "Macro Shape Random Bipolar", false));
     params.push_back(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID("MixMode", 1), "Mix Mode",
         juce::StringArray{"Gate", "Insert", "Mix"}, 1));
 

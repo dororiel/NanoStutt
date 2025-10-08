@@ -10,6 +10,7 @@
 
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
+#include "DualSlider.h"
 
 //==============================================================================
 /**
@@ -26,8 +27,8 @@ public:
     {
         g.fillAll(juce::Colours::black);
         g.setColour(juce::Colours::lime);
-        
-        const auto& buffer = processor.stutterBuffer;
+
+        const auto& buffer = processor.getStutterBuffer();
         const int numSamples = buffer.getNumSamples();
         const int channel = 0; // just show left or mono mix
 
@@ -69,12 +70,18 @@ public:
     juce::ComboBox autoStutterQuantMenu;
 
     juce::Slider nanoGateSlider, nanoShapeSlider, nanoSmoothSlider;
-    juce::Slider macroGateSlider, macroShapeSlider, macroSmoothSlider;
+    DualSlider macroGateDualSlider, macroShapeDualSlider;
+    juce::Slider macroSmoothSlider;
     juce::Slider timingOffsetSlider;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateAttachment, nanoShapeAttachment, nanoSmoothAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateAttachment, macroShapeAttachment, macroSmoothAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateRandomAttachment, macroShapeRandomAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> timingOffsetAttachment;
+
+    // Listeners for bipolar state synchronization
+    std::unique_ptr<juce::ParameterAttachment> macroGateBipolarAttachment;
+    std::unique_ptr<juce::ParameterAttachment> macroShapeBipolarAttachment;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stutterAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoStutterToggleAttachment;
@@ -95,6 +102,7 @@ public:
 
     juce::ComboBox mixModeMenu;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mixModeAttachment;
+    std::unique_ptr<juce::Label> mixModeLabel;
 
     juce::Slider nanoBlendSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoBlendAttachment;
@@ -133,6 +141,13 @@ public:
     void updateNanoRatioFromFraction(int index);
 
 private:
+    // Layout helper methods
+    void layoutEnvelopeControls(juce::Rectangle<int> bounds);
+    void layoutRateSliders(juce::Rectangle<int> bounds);
+    void layoutNanoControls(juce::Rectangle<int> bounds);
+    void layoutQuantizationControls(juce::Rectangle<int> bounds);
+    void layoutRightPanel(juce::Rectangle<int> bounds);
+    void layoutVisualizer(juce::Rectangle<int> bounds);
     std::vector<std::unique_ptr<juce::TextButton>> manualStutterButtons;
     std::vector<int> manualStutterRates { 4, 3, 6, 8, 12, 16, 24, 32 }; // Denominators
     // This reference is provided as a quick way for your editor to
