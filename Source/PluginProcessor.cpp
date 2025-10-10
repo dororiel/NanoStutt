@@ -211,6 +211,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         parametersHeld = false;
         wasPlaying = false;
         writePos = 0;
+        currentlyUsingNanoRate.store(false);
+        currentNanoFrequency.store(0.0f);
         return;
     }
 
@@ -381,6 +383,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             autoStutterActive = false;
             parametersHeld = false; // Reset for next event
 
+            // Reset nano rate tracking
+            currentlyUsingNanoRate.store(false);
+            currentNanoFrequency.store(0.0f);
+
             // Add post-stutter silence if macro gate < 1.0
             // Use CURRENT parameters (the event that just ended)
             if (currentMacroGateParam < 1.0f) {
@@ -456,8 +462,16 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                         double nanoBase = ((SECONDS_PER_MINUTE / bpm) / 16.0) / currentNanoTune;
                         double sliceDuration = nanoBase / params.getRawParameterValue("nanoRatio_" + std::to_string(selectedIndex))->load();
                         chosenDenominator = WHOLE_NOTE_SECONDS_MULTIPLIER / (bpm * sliceDuration);
+
+                        // Update nano rate tracking for tuner
+                        currentlyUsingNanoRate.store(true);
+                        currentNanoFrequency.store(static_cast<float>(1.0 / sliceDuration));
                     } else {
                         chosenDenominator = regularDenominators[selectedIndex];
+
+                        // Not using nano rate
+                        currentlyUsingNanoRate.store(false);
+                        currentNanoFrequency.store(0.0f);
                     }
                     
                     autoStutterRemainingSamples = stutterEventLengthSamples;
@@ -484,15 +498,16 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // This prevents the 3ms transition from bleeding into the end of the previous event
                     smoothedHeldMacroGate.setTargetValue(currentMacroGateParam);
 
-                    // Sample ALL nano envelope parameters for first cycle of new event
-                    nextNanoGateParam = params.getRawParameterValue("NanoGate")->load();
-                    nextNanoShapeParam = params.getRawParameterValue("NanoShape")->load();
-                    nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
-
-                    // Nano parameters become current immediately (first cycle of new event)
+                    // SWAP NEXT → CURRENT for nano parameters
+                    // The random offsets were already calculated and stored at Decision Point 2 (2ms before)
+                    // This ensures fades use the correct randomized values
                     currentNanoGateParam = nextNanoGateParam;
                     currentNanoShapeParam = nextNanoShapeParam;
                     currentNanoSmoothParam = nextNanoSmoothParam;
+
+                    // Note: heldNanoGateRandomOffset and heldNanoShapeRandomOffset were already set at Decision Point 2
+                    // These offsets will be added to per-cycle base values throughout the event
+
                     smoothedHeldNanoGate.setTargetValue(currentNanoGateParam);
 
                     // Pre-calculate nano envelope length for first cycle
@@ -580,6 +595,57 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                 nextMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
 
+                // Sample nano parameters with randomization for NEXT stutter event
+                // Calculate random offsets (these will be held for the entire upcoming event)
+
+                // Calculate NanoGate random offset
+                float nanoGateRandom = params.getRawParameterValue("NanoGateRandom")->load();
+                bool nanoGateBipolar = params.getRawParameterValue("NanoGateRandomBipolar")->load() > 0.5f;
+                float nanoGateRandomOffset;
+                if (nanoGateBipolar)
+                {
+                    // Bipolar: ±random (symmetric around center)
+                    nanoGateRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(nanoGateRandom);
+                }
+                else
+                {
+                    // Unipolar: + or - random (based on sign)
+                    if (nanoGateRandom > 0.0f)
+                        nanoGateRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoGateRandom;
+                    else
+                        nanoGateRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoGateRandom;
+                }
+
+                // Calculate NanoShape random offset
+                float nanoShapeRandom = params.getRawParameterValue("NanoShapeRandom")->load();
+                bool nanoShapeBipolar = params.getRawParameterValue("NanoShapeRandomBipolar")->load() > 0.5f;
+                float nanoShapeRandomOffset;
+                if (nanoShapeBipolar)
+                {
+                    // Bipolar: ±random (symmetric around center)
+                    nanoShapeRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(nanoShapeRandom);
+                }
+                else
+                {
+                    // Unipolar: + or - random (based on sign)
+                    if (nanoShapeRandom > 0.0f)
+                        nanoShapeRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoShapeRandom;
+                    else
+                        nanoShapeRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoShapeRandom;
+                }
+
+                // Apply offsets to base values for next event parameters (used in fade calculations)
+                float nanoGateBase = params.getRawParameterValue("NanoGate")->load();
+                float nanoShapeBase = params.getRawParameterValue("NanoShape")->load();
+
+                nextNanoGateParam = juce::jlimit(0.0f, 1.0f, nanoGateBase + nanoGateRandomOffset);
+                nextNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + nanoShapeRandomOffset);
+                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
+
+                // Store the random offsets for use throughout the event (will be copied to held offsets at event start)
+                heldNanoGateRandomOffset = nanoGateRandomOffset;
+                heldNanoShapeRandomOffset = nanoShapeRandomOffset;
+
                 parametersHeld = true;
                 parametersSampledForUpcomingEvent = true; // Prevent re-sampling for same event
 
@@ -652,6 +718,47 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 nextMacroShapeParam = juce::jlimit(0.0f, 1.0f, macroShapeBase + shapeRandomOffset);
 
                 nextMacroSmoothParam = params.getRawParameterValue("MacroSmooth")->load();
+
+                // Sample nano parameters with randomization (same as Decision Point 2)
+                float nanoGateRandom = params.getRawParameterValue("NanoGateRandom")->load();
+                bool nanoGateBipolar = params.getRawParameterValue("NanoGateRandomBipolar")->load() > 0.5f;
+                float nanoGateRandomOffset;
+                if (nanoGateBipolar)
+                {
+                    nanoGateRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(nanoGateRandom);
+                }
+                else
+                {
+                    if (nanoGateRandom > 0.0f)
+                        nanoGateRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoGateRandom;
+                    else
+                        nanoGateRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoGateRandom;
+                }
+
+                float nanoShapeRandom = params.getRawParameterValue("NanoShapeRandom")->load();
+                bool nanoShapeBipolar = params.getRawParameterValue("NanoShapeRandomBipolar")->load() > 0.5f;
+                float nanoShapeRandomOffset;
+                if (nanoShapeBipolar)
+                {
+                    nanoShapeRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(nanoShapeRandom);
+                }
+                else
+                {
+                    if (nanoShapeRandom > 0.0f)
+                        nanoShapeRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoShapeRandom;
+                    else
+                        nanoShapeRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoShapeRandom;
+                }
+
+                float nanoGateBase = params.getRawParameterValue("NanoGate")->load();
+                float nanoShapeBase = params.getRawParameterValue("NanoShape")->load();
+
+                nextNanoGateParam = juce::jlimit(0.0f, 1.0f, nanoGateBase + nanoGateRandomOffset);
+                nextNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + nanoShapeRandomOffset);
+                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
+
+                heldNanoGateRandomOffset = nanoGateRandomOffset;
+                heldNanoShapeRandomOffset = nanoShapeRandomOffset;
 
                 // Update smoothed held gate parameter
                 smoothedHeldMacroGate.setTargetValue(nextMacroGateParam);
@@ -779,9 +886,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
         // Pre-calculate all smoothed parameters ONCE per sample (before channel loop)
         // Real-time parameters (always advance smoothly)
-        float smoothNanoGate = smoothedNanoGate.getNextValue();
+        // Note: smoothNanoGate and smoothNanoSmooth are advanced but not used (randomized values held per event)
+        smoothedNanoGate.getNextValue();
         float smoothNanoShape = smoothedNanoShape.getNextValue();
-        float smoothNanoSmooth = smoothedNanoSmooth.getNextValue();
+        smoothedNanoSmooth.getNextValue();
 
         // Advance macro smoothed parameters (needed for proper ramp behavior, even if not used directly)
         smoothedMacroShape.getNextValue();
@@ -801,18 +909,23 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
             // DETECT NEW CYCLE (wrap-around) and sample parameters for next cycle
             if (loopPos < lastLoopPos) {
-                // New cycle detected - sample parameters for NEXT cycle
-                nextNanoGateParam = smoothNanoGate;
-                nextNanoShapeParam = smoothNanoShape;
-                nextNanoSmoothParam = smoothNanoSmooth;
+                // New cycle detected
+                // Resample base values and add the event-held random offsets
+                // Random offsets are calculated once per event and added to each cycle's base values
 
-                // Immediately swap to current (new cycle starts now)
-                currentNanoGateParam = nextNanoGateParam;
-                currentNanoShapeParam = nextNanoShapeParam;
-                currentNanoSmoothParam = nextNanoSmoothParam;
+                // NanoGate: Resample base value and add held random offset
+                float nanoGateBase = smoothedNanoGate.getCurrentValue();
+                currentNanoGateParam = juce::jlimit(0.0f, 1.0f, nanoGateBase + heldNanoGateRandomOffset);
                 smoothedHeldNanoGate.setTargetValue(currentNanoGateParam);
 
-                // Pre-calculate nano envelope length for this cycle
+                // NanoShape: Resample base value and add held random offset
+                float nanoShapeBase = smoothNanoShape;
+                currentNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + heldNanoShapeRandomOffset);
+
+                // NanoSmooth: Resample (no randomization)
+                currentNanoSmoothParam = smoothedNanoSmooth.getCurrentValue();
+
+                // Pre-calculate nano envelope length for this cycle (using randomized nanoGate value)
                 float nanoGateMultiplier = NANO_GATE_MIN + currentNanoGateParam * NANO_GATE_RANGE;
                 heldNanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
             }
@@ -835,8 +948,9 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             shouldApplyNanoSmooth = (nanoFadeLen > 1 && loopPos >= loopLen - nanoFadeLen && currentNanoSmoothParam > 0.0f);
 
             // Skip nano smooth at end of first forward cycle when reverse is enabled
-            // because the reversed cycle starts at the exact same sample position
-            if (currentStutterIsReversed && !firstRepeatCyclePlayed) {
+            // ONLY if nanoGate is at maximum (1.0) - when there's no fade-out
+            // When nanoGate < 1.0, we need the crossfade to avoid clicks from the 0→start transition
+            if (currentStutterIsReversed && !firstRepeatCyclePlayed && smoothHeldNanoGate >= 1.0f) {
                 shouldApplyNanoSmooth = false;
             }
             if (shouldApplyNanoSmooth) {
@@ -861,7 +975,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             {
 
                 // NANO ENVELOPE (controls internal loop behavior)
-                // Use smoothed nanoShape for click-free parameter changes within cycles
+                // Use currentNanoShapeParam (base + random offset) for envelope shape
                 // For reversed playback (after first cycle), reverse the envelope too for seamless transition
                 float nanoProgress;
                 if (currentStutterIsReversed && firstRepeatCyclePlayed) {
@@ -871,8 +985,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // Forward playback: envelope runs forward (0.0 → 1.0)
                     nanoProgress = (float)loopPos / (float)heldNanoEnvelopeLengthInSamples;
                 }
-                // Use smoothed nanoShape directly to prevent clicks from rapid parameter changes
-                float nanoGain = calculateEnvelopeGain(nanoProgress, smoothNanoShape);
+                // Use currentNanoShapeParam which includes randomization (base + held random offset)
+                float nanoGain = calculateEnvelopeGain(nanoProgress, currentNanoShapeParam);
 
                 if (loopPos < heldNanoEnvelopeLengthInSamples) {
                     // Check if we're in fade-out region (constant 0.1ms fade)
@@ -930,16 +1044,21 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 wetSample = stutterBuffer.getSample(ch, readIndex) * macroGain * nanoGain;
 
 
-                // Apply nano smooth (crossfade between loop repetitions) - using smoothed nanoShape
+                // Apply nano smooth (crossfade between loop repetitions) - using currentNanoShapeParam with randomization
                 if (shouldApplyNanoSmooth)
                 {
                     // Calculate nano gain for loop start position
                     // For reversed playback: loop starts at envelope END (progress = 1.0)
                     // For forward playback: loop starts at envelope START (progress = 0.0)
-                    float loopStartNanoProgress = (currentStutterIsReversed && firstRepeatCyclePlayed) ? 1.0f : 0.0f;
-                    float loopStartNanoGain = calculateEnvelopeGain(loopStartNanoProgress, smoothNanoShape);
+                    float loopStartNanoProgress = currentStutterIsReversed ? 1.0f : 0.0f;
+                    float loopStartNanoGain = calculateEnvelopeGain(loopStartNanoProgress, currentNanoShapeParam);
 
                     float incomingSample = stutterBuffer.getSample(ch, startOfLoopReadIndex) * macroGain * loopStartNanoGain;
+                    
+                    if (currentStutterIsReversed && !firstRepeatCyclePlayed) {
+                        incomingSample = drySample * macroGain * loopStartNanoGain;
+                    }
+                    
                     wetSample = wetSample * (1.0f - nanoFadeProgress) + incomingSample * nanoFadeProgress;
                 }
             }
@@ -999,6 +1118,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         // Update state tracking for next iteration
         wasStuttering = (autoStutterActive && postStutterSilence <= 0);
     }
+
+    // Safety check: Ensure nano flags are always reset when not actively stuttering
+    // This prevents the tuner from getting stuck showing stale frequency data
+    if (!autoStutterActive) {
+        currentlyUsingNanoRate.store(false);
+        currentNanoFrequency.store(0.0f);
+    }
+
     writePos = (writePos + numSamples) % maxStutterLenSamples;
 
     // Apply waveshaping using JUCE DSP ProcessorChain
@@ -1186,6 +1313,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGate", 1), "Nano Gate", 0.0f, 1.0f, 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShape", 1), "Nano Shape", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoSmooth", 1), "Nano Smooth", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGateRandom", 1), "Nano Gate Random", -1.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShapeRandom", 1), "Nano Shape Random", -1.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("NanoGateRandomBipolar", 1), "Nano Gate Random Bipolar", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("NanoShapeRandomBipolar", 1), "Nano Shape Random Bipolar", false));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroGate", 1), "Macro Gate", 0.25f, 1.0f, 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroShape", 1), "Macro Shape", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroSmooth", 1), "Macro Smooth", 0.0f, 1.0f, 0.0f));

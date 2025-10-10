@@ -11,6 +11,7 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 #include "DualSlider.h"
+#include "AutoStutterIndicator.h"
 
 //==============================================================================
 /**
@@ -58,33 +59,118 @@ private:
     NanoStuttAudioProcessor& processor;
 };
 
+class NanoPitchTuner : public juce::Component, private juce::Timer
+{
+public:
+    NanoPitchTuner(NanoStuttAudioProcessor& p) : processor(p)
+    {
+        startTimerHz(30); // update 30 times per second
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(juce::Colours::black);
+
+        // Get current BPM from playhead
+        auto playHead = processor.getPlayHead();
+        double bpm = 120.0;
+        if (playHead != nullptr)
+        {
+            if (auto posInfo = playHead->getPosition())
+            {
+                if (posInfo->getBpm())
+                    bpm = *posInfo->getBpm();
+            }
+        }
+
+        // Calculate base frequency (at ratio = 1.0, current tune)
+        double currentNanoTune = processor.getParameters().getRawParameterValue("nanoTune")->load();
+        double nanoBase = ((60.0 / bpm) / 16.0) / currentNanoTune;
+        float frequency;
+        bool isActive = processor.isUsingNanoRate();
+        float storedFrequency = processor.getNanoFrequency();
+
+        // Use stored frequency only if it's valid and we're in active mode
+        if (isActive && storedFrequency > 0.0f && std::isfinite(storedFrequency))
+        {
+            // Use actual playing frequency
+            frequency = storedFrequency;
+            g.setColour(juce::Colours::lime);
+        }
+        else
+        {
+            // Use base frequency (ratio = 1.0) - shown in grey
+            frequency = static_cast<float>(1.0 / nanoBase);
+            g.setColour(juce::Colours::grey);
+        }
+
+        // Validate frequency
+        if (!std::isfinite(frequency) || frequency <= 0.0f)
+        {
+            g.setColour(juce::Colours::grey);
+            g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
+            g.drawText("--", getLocalBounds(), juce::Justification::centred);
+            return;
+        }
+
+        // Convert frequency to MIDI note and cents
+        float midiNote = 69.0f + 12.0f * std::log2(frequency / 440.0f);
+        int noteNumber = static_cast<int>(std::round(midiNote));
+        float cents = (midiNote - noteNumber) * 100.0f;
+
+        // Note names
+        const char* noteNames[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        int noteIndex = ((noteNumber % 12) + 12) % 12;  // Ensure positive modulo
+        int octave = (noteNumber / 12) - 1;
+
+        // Format display string
+        juce::String displayText = juce::String(noteNames[noteIndex]) + juce::String(octave);
+        if (cents > 0.5f)
+            displayText += " +" + juce::String(static_cast<int>(cents)) + "¢";
+        else if (cents < -0.5f)
+            displayText += " " + juce::String(static_cast<int>(cents)) + "¢";
+
+        g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
+        g.drawText(displayText, getLocalBounds(), juce::Justification::centred);
+    }
+
+private:
+    void timerCallback() override { repaint(); }
+
+    NanoStuttAudioProcessor& processor;
+};
+
 class NanoStuttAudioProcessorEditor  : public juce::AudioProcessorEditor
 {
 public:
     NanoStuttAudioProcessorEditor (NanoStuttAudioProcessor&);
     ~NanoStuttAudioProcessorEditor() override;
     juce::ToggleButton stutterButton;
-    juce::ToggleButton autoStutterToggle;
+    AutoStutterIndicator autoStutterIndicator;
     juce::Slider autoStutterChanceSlider;
     juce::Slider reverseChanceSlider;
     juce::ComboBox autoStutterQuantMenu;
 
-    juce::Slider nanoGateSlider, nanoShapeSlider, nanoSmoothSlider;
+    DualSlider nanoGateDualSlider;
+    DualSlider nanoShapeDualSlider;
+    juce::Slider nanoSmoothSlider;
     DualSlider macroGateDualSlider, macroShapeDualSlider;
     juce::Slider macroSmoothSlider;
     juce::Slider timingOffsetSlider;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateAttachment, nanoShapeAttachment, nanoSmoothAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateRandomAttachment, nanoShapeRandomAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateAttachment, macroShapeAttachment, macroSmoothAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateRandomAttachment, macroShapeRandomAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> timingOffsetAttachment;
 
     // Listeners for bipolar state synchronization
+    std::unique_ptr<juce::ParameterAttachment> nanoGateBipolarAttachment;
+    std::unique_ptr<juce::ParameterAttachment> nanoShapeBipolarAttachment;
     std::unique_ptr<juce::ParameterAttachment> macroGateBipolarAttachment;
     std::unique_ptr<juce::ParameterAttachment> macroShapeBipolarAttachment;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stutterAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoStutterToggleAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> autoStutterChanceAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> reverseChanceAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> autoStutterQuantAttachment;
@@ -110,9 +196,13 @@ public:
     juce::OwnedArray<juce::Slider> nanoRateProbSliders;
     juce::OwnedArray<juce::TextEditor> nanoNumerators;
     juce::OwnedArray<juce::TextEditor> nanoDenominators;
+    juce::OwnedArray<juce::Label> nanoIntervalLabels;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> nanoRatioAttachments;
 
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> nanoRateProbAttachments;
+
+    juce::ToggleButton advancedViewToggle;
+    bool showAdvancedView = false;
    
     juce::Label nanoBlendLabel;
     
@@ -134,6 +224,7 @@ public:
 
 
     StutterVisualizer visualizer;
+    NanoPitchTuner tuner;
 
     //==============================================================================
     void paint (juce::Graphics&) override;
@@ -141,6 +232,10 @@ public:
     void updateNanoRatioFromFraction(int index);
 
 private:
+    // Stored bounds for drawing colored borders
+    juce::Rectangle<int> rhythmicSlidersBounds;
+    juce::Rectangle<int> nanoSlidersBounds;
+
     // Layout helper methods
     void layoutEnvelopeControls(juce::Rectangle<int> bounds);
     void layoutRateSliders(juce::Rectangle<int> bounds);

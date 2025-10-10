@@ -11,7 +11,7 @@
 
 //==============================================================================
 NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProcessor& p)
-: AudioProcessorEditor (&p), visualizer(p), audioProcessor (p)
+: AudioProcessorEditor (&p), autoStutterIndicator(p), visualizer(p), tuner(p), audioProcessor (p)
 {
     // === Manual Stutter Button === //
     addAndMakeVisible(stutterButton);
@@ -22,12 +22,8 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         "stutterOn",
         stutterButton);
     
-    // === Auto Stutter Toggle ===
-    addAndMakeVisible(autoStutterToggle);
-    autoStutterToggle.setButtonText("Auto Stutter");
-
-    autoStutterToggleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        audioProcessor.getParameters(), "autoStutterEnabled", autoStutterToggle);
+    // === Auto Stutter Indicator ===
+    addAndMakeVisible(autoStutterIndicator);
 
     // === Auto Stutter Chance Slider ===
     addAndMakeVisible(autoStutterChanceSlider);
@@ -64,8 +60,59 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(audioProcessor.getParameters(), paramID, slider);
     };
 
-    setupKnob(nanoGateSlider, "NanoGate", nanoGateAttachment);
-    setupKnob(nanoShapeSlider, "NanoShape", nanoShapeAttachment);
+    // Setup DualSliders for NanoGate and NanoShape with randomization
+    addAndMakeVisible(nanoGateDualSlider);
+    nanoGateDualSlider.setDefaultValues(1.0, 0.0);  // NanoGate default: 1.0, Random default: 0.0
+    nanoGateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "NanoGate", nanoGateDualSlider.getMainSlider());
+    nanoGateRandomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "NanoGateRandom", nanoGateDualSlider.getRandomSlider());
+
+    // Setup bipolar state synchronization for NanoGate
+    nanoGateBipolarAttachment = std::make_unique<juce::ParameterAttachment>(
+        *audioProcessor.getParameters().getParameter("NanoGateRandomBipolar"),
+        [this](float newValue) {
+            nanoGateDualSlider.setBipolarMode(newValue > 0.5f);
+        });
+
+    // Set initial state
+    nanoGateDualSlider.setBipolarMode(
+        audioProcessor.getParameters().getRawParameterValue("NanoGateRandomBipolar")->load() > 0.5f);
+
+    // Listen for changes from UI (right-click toggle)
+    nanoGateDualSlider.onBipolarModeChange = [this](bool isBipolar) {
+        auto* param = audioProcessor.getParameters().getParameter("NanoGateRandomBipolar");
+        if (param)
+            param->setValueNotifyingHost(isBipolar ? 1.0f : 0.0f);
+    };
+
+    // Setup DualSlider for NanoShape with randomization
+    addAndMakeVisible(nanoShapeDualSlider);
+    nanoShapeDualSlider.setDefaultValues(0.5, 0.0);  // NanoShape default: 0.5, Random default: 0.0
+    nanoShapeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "NanoShape", nanoShapeDualSlider.getMainSlider());
+    nanoShapeRandomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "NanoShapeRandom", nanoShapeDualSlider.getRandomSlider());
+
+    // Setup bipolar state synchronization for NanoShape
+    nanoShapeBipolarAttachment = std::make_unique<juce::ParameterAttachment>(
+        *audioProcessor.getParameters().getParameter("NanoShapeRandomBipolar"),
+        [this](float newValue) {
+            nanoShapeDualSlider.setBipolarMode(newValue > 0.5f);
+        });
+
+    // Set initial state
+    nanoShapeDualSlider.setBipolarMode(
+        audioProcessor.getParameters().getRawParameterValue("NanoShapeRandomBipolar")->load() > 0.5f);
+
+    // Listen for changes from UI (right-click toggle)
+    nanoShapeDualSlider.onBipolarModeChange = [this](bool isBipolar) {
+        auto* param = audioProcessor.getParameters().getParameter("NanoShapeRandomBipolar");
+        if (param)
+            param->setValueNotifyingHost(isBipolar ? 1.0f : 0.0f);
+    };
+
+    // NanoSmooth remains a regular slider (no randomization)
     setupKnob(nanoSmoothSlider, "NanoSmooth", nanoSmoothAttachment);
 
     // Setup DualSliders for MacroGate and MacroShape with randomization
@@ -137,8 +184,8 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         addAndMakeVisible(label);
     };
 
-    setupLabel(nanoGateLabel, "Gate", nanoGateSlider);
-    setupLabel(nanoShapeLabel, "Shape", nanoShapeSlider);
+    setupLabel(nanoGateLabel, "Gate", nanoGateDualSlider);
+    setupLabel(nanoShapeLabel, "Shape", nanoShapeDualSlider);
     setupLabel(nanoSmoothLabel, "Smooth", nanoSmoothSlider);
     setupLabel(macroGateLabel, "Gate", macroGateDualSlider);
     setupLabel(macroShapeLabel, "Shape", macroShapeDualSlider);
@@ -164,6 +211,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
 
         auto* label = new juce::Label();
         label->setText(rateLabels[i], juce::dontSendNotification);
+        label->setJustificationType(juce::Justification::centred);
         label->attachToComponent(slider, false);
         addAndMakeVisible(label);
         rateProbLabels.add(label);
@@ -300,6 +348,14 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     gainCompensationAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         audioProcessor.getParameters(), "GainCompensation", gainCompensationToggle);
 
+    // === Advanced View Toggle ===
+    addAndMakeVisible(advancedViewToggle);
+    advancedViewToggle.setButtonText("Advanced View");
+    advancedViewToggle.onClick = [this]() {
+        showAdvancedView = !showAdvancedView;
+        resized();
+    };
+
     // === Editable Nano Ratio Numerator/Denominator Sliders ===
     for (int i = 0; i < 12; ++i)
     {
@@ -350,12 +406,24 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
             audioProcessor.getParameters(), paramId, *slider));
     }
 
+    // === Nano Interval Labels (Roman Numerals) ===
+    auto intervalLabels = juce::StringArray { "I", "ii", "II", "iii", "III", "IV", "#iv", "V", "vi", "VI", "vii", "VII" };
+    for (int i = 0; i < 12; ++i)
+    {
+        auto* label = new juce::Label();
+        label->setText(intervalLabels[i], juce::dontSendNotification);
+        label->setJustificationType(juce::Justification::centred);
+        addAndMakeVisible(label);
+        nanoIntervalLabels.add(label);
+    }
+
 
 
 
 
 
     addAndMakeVisible(visualizer);
+    addAndMakeVisible(tuner);
 
     setResizeLimits(800, 400, 1200, 600);
     setSize(900, 450);
@@ -379,6 +447,31 @@ void NanoStuttAudioProcessorEditor::paint (juce::Graphics& g)
     g.setColour (juce::Colours::white);
     g.setFont (juce::FontOptions (15.0f));
     //g.drawFittedText ("Hello World!", getLocalBounds(), juce::Justification::centred, 1);
+
+    // Draw colored backgrounds and borders around slider sections
+    // Orange section for regular rate sliders
+    if (!rhythmicSlidersBounds.isEmpty())
+    {
+        // Draw semi-transparent fill first
+        g.setColour(juce::Colour(0xffff9933).withAlpha(0.08f));
+        g.fillRect(rhythmicSlidersBounds.toFloat());
+
+        // Draw border on top
+        g.setColour(juce::Colour(0xffff9933));  // Orange (matches regular stutter indicator)
+        g.drawRect(rhythmicSlidersBounds.toFloat(), 2.0f);
+    }
+
+    // Purple section for nano sliders
+    if (!nanoSlidersBounds.isEmpty())
+    {
+        // Draw semi-transparent fill first
+        g.setColour(juce::Colour(0xff9966ff).withAlpha(0.08f));
+        g.fillRect(nanoSlidersBounds.toFloat());
+
+        // Draw border on top
+        g.setColour(juce::Colour(0xff9966ff));  // Purple (matches nano stutter indicator)
+        g.drawRect(nanoSlidersBounds.toFloat(), 2.0f);
+    }
 }
 
 void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> bounds)
@@ -405,8 +498,8 @@ void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> 
         GridItem(macroSmoothSlider).withArea(3, 1, 3, 3),
         GridItem(),
         GridItem(nanoControlsLabel).withArea(5, 1, 5, 3),
-        GridItem(nanoGateSlider).withArea(6, 1),
-        GridItem(nanoShapeSlider).withArea(6, 2),
+        GridItem(nanoGateDualSlider).withArea(6, 1),
+        GridItem(nanoShapeDualSlider).withArea(6, 2),
         GridItem(nanoSmoothSlider).withArea(7, 1, 7, 3)
     };
     envelopeGrid.performLayout(bounds);
@@ -446,30 +539,50 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
     using Fr = Grid::Fr;
 
     Grid nanoGrid;
-    nanoGrid.templateRows = { Track(Px(20)), Track(Px(20)), Track(Px(110)) };
+
+    // Set up grid rows based on advanced view state
+    if (showAdvancedView)
+    {
+        // Advanced view: numerators, denominators, sliders, labels
+        nanoGrid.templateRows = { Track(Px(20)), Track(Px(20)), Track(Px(90)), Track(Px(15)) };
+    }
+    else
+    {
+        // Simple view: sliders and labels only
+        nanoGrid.templateRows = { Track(Px(110)), Track(Px(15)) };
+    }
+
     nanoGrid.templateColumns.clear();
     for (int i = 0; i < nanoRateProbSliders.size() && i < 12; ++i)
         nanoGrid.templateColumns.add(Track(Fr(1)));
     nanoGrid.columnGap = Px(3);
-    nanoGrid.rowGap = Px(0);
+    nanoGrid.rowGap = Px(2);
 
     nanoGrid.items.clear();
     for (int i = 0; i < nanoRateProbSliders.size() && i < 12; ++i)
     {
-        nanoGrid.items.add(GridItem(*nanoNumerators[i]).withArea(1, i + 1));
-        nanoGrid.items.add(GridItem(*nanoDenominators[i]).withArea(2, i + 1));
-        nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(3, i + 1));
+        if (showAdvancedView)
+        {
+            // Show numerators and denominators
+            nanoNumerators[i]->setVisible(true);
+            nanoDenominators[i]->setVisible(true);
+
+            nanoGrid.items.add(GridItem(*nanoNumerators[i]).withArea(1, i + 1));
+            nanoGrid.items.add(GridItem(*nanoDenominators[i]).withArea(2, i + 1));
+            nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(3, i + 1));
+            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(4, i + 1));
+        }
+        else
+        {
+            // Hide numerators and denominators
+            nanoNumerators[i]->setVisible(false);
+            nanoDenominators[i]->setVisible(false);
+
+            nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(1, i + 1));
+            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(2, i + 1));
+        }
     }
     nanoGrid.performLayout(bounds);
-
-    // Auto stutter toggle (center it in the provided bounds)
-    auto toggleBounds = juce::Rectangle<int>(
-        bounds.getX(),
-        bounds.getY() + bounds.getHeight() + 10,
-        bounds.getWidth(),
-        30
-    );
-    autoStutterToggle.setBounds(toggleBounds.withSizeKeepingCentre(100, 22));
 }
 
 void NanoStuttAudioProcessorEditor::layoutQuantizationControls(juce::Rectangle<int> bounds)
@@ -556,11 +669,12 @@ void NanoStuttAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
 
-    // === Mix Mode in top-right corner (absolute positioning) ===
+    // === Top-right corner controls (absolute positioning) ===
+    autoStutterIndicator.setBounds(bounds.getWidth() - 158, 5, 28, 22);
     mixModeMenu.setBounds(bounds.getWidth() - 125, 5, 115, 22);
 
     // Calculate main layout areas
-    auto contentBounds = bounds.reduced(8).withTrimmedTop(35); // Leave space for mix mode
+    auto contentBounds = bounds.reduced(8).withTrimmedTop(35); // Leave space for top controls
 
     const int leftWidth = 170;
     const int rightWidth = 140;
@@ -600,12 +714,32 @@ void NanoStuttAudioProcessorEditor::resized()
 
     // Center panel: Rate sliders, Nano controls, and Quantization
     auto rhythmicBounds = centerBounds.withTrimmedBottom(centerBounds.getHeight() - 100);
-    auto nanoBounds = centerBounds.withTrimmedTop(110).withHeight(160);
-    auto quantBounds = centerBounds.withTrimmedTop(320);
+    // Expand bounds to include labels above sliders (attached with attachToComponent)
+    // Move border up and closer to labels
+    rhythmicSlidersBounds = rhythmicBounds.expanded(3, 0).withTop(rhythmicBounds.getY() - 20).withBottom(rhythmicBounds.getBottom() + 2);
+
+    // Advanced view toggle positioned above nano controls
+    auto advancedToggleBounds = centerBounds.withTrimmedTop(100).withHeight(22);
+    advancedViewToggle.setBounds(advancedToggleBounds.withSizeKeepingCentre(120, 22));
+
+    auto nanoBounds = centerBounds.withTrimmedTop(130).withHeight(showAdvancedView ? 145 : 140);
+    // Expand bounds to include all nano elements (numerators at top when advanced, labels at bottom)
+    // Conditional sizing to prevent overlap with quant area in advanced view
+    if (showAdvancedView) {
+        // More top spacing for numerators, less bottom to avoid overlap
+        nanoSlidersBounds = nanoBounds.expanded(3, 0).withTop(nanoBounds.getY() - 10).withBottom(nanoBounds.getBottom() + 6);
+    } else {
+        // Less room at bottom for interval labels only
+        nanoSlidersBounds = nanoBounds.expanded(3, 0).withTop(nanoBounds.getY() - 2).withBottom(nanoBounds.getBottom() + 8);
+    }
+
+    auto quantBounds = centerBounds.withTrimmedTop(showAdvancedView ? 285 : 280).withHeight(70);
+    auto tunerBounds = centerBounds.withTrimmedTop(showAdvancedView ? 360 : 355).withHeight(35);
 
     layoutRateSliders(rhythmicBounds);
     layoutNanoControls(nanoBounds);
     layoutQuantizationControls(quantBounds);
+    tuner.setBounds(tunerBounds);
 
     layoutRightPanel(rightBounds);
     layoutVisualizer(visualizerBounds);

@@ -64,6 +64,10 @@ public:
     void setManualStutterTriggered(bool triggered) { manualStutterTriggered = triggered; }
     void setAutoStutterActive(bool active) { autoStutterActive = active; }
 
+    bool isUsingNanoRate() const { return currentlyUsingNanoRate.load(); }
+    float getNanoFrequency() const { return currentNanoFrequency.load(); }
+    bool isAutoStutterActive() const { return autoStutterActive; }
+
 private:
     // ==== Timing Constants ====
     static constexpr double FADE_DURATION_MS = 1.0;
@@ -152,6 +156,10 @@ private:
     float nextNanoShapeParam = 0.5f;
     float nextNanoSmoothParam = 0.0f;
 
+    // Held random offsets for nano parameters (calculated once per event, added to per-cycle values)
+    float heldNanoGateRandomOffset = 0.0f;
+    float heldNanoShapeRandomOffset = 0.0f;
+
     bool parametersHeld = false;
     
     // Dynamic quantization
@@ -169,6 +177,10 @@ private:
 
     // Manual timing offset for master track delay compensation
     std::atomic<float>* timingOffsetParam = nullptr;
+
+    // Nano rate tracking for tuner display
+    std::atomic<bool> currentlyUsingNanoRate {false};
+    std::atomic<float> currentNanoFrequency {0.0f};
 
     // Smoothed envelope parameters (0.3ms ramp time for fast response, prevents bleeding across events)
     juce::LinearSmoothedValue<float> smoothedNanoGate;
