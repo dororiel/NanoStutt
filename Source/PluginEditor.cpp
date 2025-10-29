@@ -8,6 +8,9 @@
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <algorithm>  // for std::shuffle
+#include <random>     // for std::default_random_engine
+#include <vector>     // for std::vector
 
 //==============================================================================
 NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProcessor& p)
@@ -198,9 +201,24 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     macroControlsLabel.setText("Macro Envelope", juce::dontSendNotification);
     macroControlsLabel.setJustificationType(juce::Justification::centred);
     addAndMakeVisible(macroControlsLabel);
+
+    // === Section Labels ===
+    repeatRatesLabel.setText("Repeat Rates", juce::dontSendNotification);
+    repeatRatesLabel.setJustificationType(juce::Justification::centred);
+    repeatRatesLabel.setColour(juce::Label::textColourId, juce::Colour(0xffff9933)); // Orange
+    addAndMakeVisible(repeatRatesLabel);
+
+    nanoRatesLabel.setText("Nano Rates", juce::dontSendNotification);
+    nanoRatesLabel.setJustificationType(juce::Justification::centred);
+    nanoRatesLabel.setColour(juce::Label::textColourId, juce::Colour(0xff9966ff)); // Purple
+    addAndMakeVisible(nanoRatesLabel);
+
+    quantizationLabel.setText("Quantization", juce::dontSendNotification);
+    quantizationLabel.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(quantizationLabel);
     
     // === Rate Sliders and buttons ===
-    auto rateLabels = juce::StringArray { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    auto rateLabels = juce::StringArray { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
     for (int i = 0; i < rateLabels.size(); ++i)
     {
         auto* slider = new juce::Slider();
@@ -212,17 +230,28 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         auto* label = new juce::Label();
         label->setText(rateLabels[i], juce::dontSendNotification);
         label->setJustificationType(juce::Justification::centred);
-        label->attachToComponent(slider, false);
         addAndMakeVisible(label);
         rateProbLabels.add(label);
 
         juce::String paramId = "rateProb_" + rateLabels[i];
         rateProbAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             audioProcessor.getParameters(), paramId, *slider));
+
+        // Create visibility toggle button (eye icon)
+        auto* toggleButton = new juce::TextButton();
+        toggleButton->setButtonText(juce::CharPointer_UTF8("\xf0\x9f\x91\x81")); // 👁 emoji
+        toggleButton->setClickingTogglesState(true);
+        toggleButton->onClick = [this]() { resized(); };
+        addAndMakeVisible(toggleButton);
+        rateActiveButtons.add(toggleButton);
+
+        juce::String activeParamId = "rateActive_" + rateLabels[i];
+        rateActiveAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            audioProcessor.getParameters(), activeParamId, *toggleButton));
     }
     
     // === Quant Probability Sliders ===
-    auto quantLabels = juce::StringArray { "1/4", "1/8", "1/16", "1/32" };
+    auto quantLabels = juce::StringArray { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
     for (int i = 0; i < quantLabels.size(); ++i)
     {
         auto* slider = new juce::Slider();
@@ -240,6 +269,18 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         juce::String paramId = "quantProb_" + quantLabels[i];
         quantProbAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             audioProcessor.getParameters(), paramId, *slider));
+
+        // Create visibility toggle button (eye icon)
+        auto* toggleButton = new juce::TextButton();
+        toggleButton->setButtonText(juce::CharPointer_UTF8("\xf0\x9f\x91\x81")); // 👁 emoji
+        toggleButton->setClickingTogglesState(true);
+        toggleButton->onClick = [this]() { resized(); };
+        addAndMakeVisible(toggleButton);
+        quantActiveButtons.add(toggleButton);
+
+        juce::String activeParamId = "quantActive_" + quantLabels[i];
+        quantActiveAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            audioProcessor.getParameters(), activeParamId, *toggleButton));
     }
     
     // === Labels for main knobs ===
@@ -353,7 +394,19 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     advancedViewToggle.setButtonText("Advanced View");
     advancedViewToggle.onClick = [this]() {
         showAdvancedView = !showAdvancedView;
+
+        // Auto-resize window for better fit in advanced view
+        const int currentWidth = getWidth();
+        if (showAdvancedView) {
+            // Entering advanced view: increase height for extra content
+            setSize(currentWidth, 650);  // From 450 to 680 (+230px)
+        } else {
+            // Exiting advanced view: restore original height
+            setSize(currentWidth, 430);
+        }
+
         resized();
+        repaint();  // Force repaint to update borders immediately
     };
 
     // === Editable Nano Ratio Numerator/Denominator Sliders ===
@@ -404,6 +457,18 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         juce::String paramId = "nanoProb_" + juce::String(i);
         nanoRateProbAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             audioProcessor.getParameters(), paramId, *slider));
+
+        // Create visibility toggle button (eye icon)
+        auto* toggleButton = new juce::TextButton();
+        toggleButton->setButtonText(juce::CharPointer_UTF8("\xf0\x9f\x91\x81")); // 👁 emoji
+        toggleButton->setClickingTogglesState(true);
+        toggleButton->onClick = [this]() { resized(); };
+        addAndMakeVisible(toggleButton);
+        nanoActiveButtons.add(toggleButton);
+
+        juce::String activeParamId = "nanoActive_" + juce::String(i);
+        nanoActiveAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            audioProcessor.getParameters(), activeParamId, *toggleButton));
     }
 
     // === Nano Interval Labels (Roman Numerals) ===
@@ -417,16 +482,119 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         nanoIntervalLabels.add(label);
     }
 
+    // === Reset Buttons ===
+    addAndMakeVisible(resetRateProbButton);
+    resetRateProbButton.setButtonText("Reset");
+    resetRateProbButton.onClick = [this, rateLabels]() {
+        for (int i = 0; i < rateProbSliders.size(); ++i)
+        {
+            if (auto* param = audioProcessor.getParameters().getParameter("rateProb_" + rateLabels[i]))
+                param->setValueNotifyingHost(0.0f);
+        }
+    };
 
+    addAndMakeVisible(resetNanoProbButton);
+    resetNanoProbButton.setButtonText("Reset");
+    resetNanoProbButton.onClick = [this]() {
+        for (int i = 0; i < nanoRateProbSliders.size(); ++i)
+        {
+            if (auto* param = audioProcessor.getParameters().getParameter("nanoProb_" + juce::String(i)))
+                param->setValueNotifyingHost(0.0f);
+        }
+    };
 
+    addAndMakeVisible(resetQuantProbButton);
+    resetQuantProbButton.setButtonText("Reset");
+    resetQuantProbButton.onClick = [this, quantLabels]() {
+        for (int i = 0; i < quantProbSliders.size(); ++i)
+        {
+            if (auto* param = audioProcessor.getParameters().getParameter("quantProb_" + quantLabels[i]))
+                param->setValueNotifyingHost(0.0f);
+        }
+    };
 
+    // === Randomize Buttons ===
+    addAndMakeVisible(randomizeRateProbButton);
+    randomizeRateProbButton.setButtonText("Random");
+    randomizeRateProbButton.onClick = [this, rateLabels]() {
+        // Pick random number of sliders (3-5)
+        int numToRandomize = juce::Random::getSystemRandom().nextInt(juce::Range<int>(3, 6)); // 3, 4, or 5
+
+        // Create shuffled indices
+        std::vector<int> indices;
+        for (int i = 0; i < rateProbSliders.size(); ++i)
+            indices.push_back(i);
+        std::shuffle(indices.begin(), indices.end(), std::default_random_engine(juce::Random::getSystemRandom().nextInt()));
+
+        // Set first numToRandomize sliders to random values, rest to 0
+        for (int i = 0; i < rateProbSliders.size(); ++i)
+        {
+            if (auto* param = audioProcessor.getParameters().getParameter("rateProb_" + rateLabels[indices[i]]))
+            {
+                if (i < numToRandomize)
+                    param->setValueNotifyingHost(0.3f + juce::Random::getSystemRandom().nextFloat() * 0.7f); // 0.3 to 1.0
+                else
+                    param->setValueNotifyingHost(0.0f);
+            }
+        }
+    };
+
+    addAndMakeVisible(randomizeNanoProbButton);
+    randomizeNanoProbButton.setButtonText("Random");
+    randomizeNanoProbButton.onClick = [this]() {
+        // Pick random number of sliders (3-5)
+        int numToRandomize = juce::Random::getSystemRandom().nextInt(juce::Range<int>(3, 6));
+
+        // Create shuffled indices
+        std::vector<int> indices;
+        for (int i = 0; i < nanoRateProbSliders.size(); ++i)
+            indices.push_back(i);
+        std::shuffle(indices.begin(), indices.end(), std::default_random_engine(juce::Random::getSystemRandom().nextInt()));
+
+        // Set first numToRandomize sliders to random values, rest to 0
+        for (int i = 0; i < nanoRateProbSliders.size(); ++i)
+        {
+            if (auto* param = audioProcessor.getParameters().getParameter("nanoProb_" + juce::String(indices[i])))
+            {
+                if (i < numToRandomize)
+                    param->setValueNotifyingHost(0.3f + juce::Random::getSystemRandom().nextFloat() * 0.7f);
+                else
+                    param->setValueNotifyingHost(0.0f);
+            }
+        }
+    };
+
+    addAndMakeVisible(randomizeQuantProbButton);
+    randomizeQuantProbButton.setButtonText("Random");
+    randomizeQuantProbButton.onClick = [this, quantLabels]() {
+        // Pick random number of sliders (3-5)
+        int numToRandomize = juce::Random::getSystemRandom().nextInt(juce::Range<int>(3, 6));
+
+        // Create shuffled indices
+        std::vector<int> indices;
+        for (int i = 0; i < quantProbSliders.size(); ++i)
+            indices.push_back(i);
+        std::shuffle(indices.begin(), indices.end(), std::default_random_engine(juce::Random::getSystemRandom().nextInt()));
+
+        // Set first numToRandomize sliders to random values, rest to 0
+        for (int i = 0; i < quantProbSliders.size(); ++i)
+        {
+            if (auto* param = audioProcessor.getParameters().getParameter("quantProb_" + quantLabels[indices[i]]))
+            {
+                if (i < numToRandomize)
+                    param->setValueNotifyingHost(0.3f + juce::Random::getSystemRandom().nextFloat() * 0.7f);
+                else
+                    param->setValueNotifyingHost(0.0f);
+            }
+        }
+    };
 
 
     addAndMakeVisible(visualizer);
     addAndMakeVisible(tuner);
 
     setResizeLimits(800, 400, 1200, 600);
-    setSize(900, 450);
+    setSize(900, 430);
     setResizable(true, true);
 
 
@@ -514,16 +682,101 @@ void NanoStuttAudioProcessorEditor::layoutRateSliders(juce::Rectangle<int> bound
     using Fr = Grid::Fr;
 
     Grid rhythmicGrid;
-    rhythmicGrid.templateRows = { Track(Fr(1)) };
-    rhythmicGrid.templateColumns.clear();
-    for (int i = 0; i < rateProbSliders.size(); ++i)
-        rhythmicGrid.templateColumns.add(Track(Fr(1)));
-    rhythmicGrid.columnGap = Px(4);
+    // Grid rows depend on view mode
+    if (showAdvancedView) {
+        // Advanced: toggles (20) + sliders (90) + labels (15)
+        rhythmicGrid.templateRows = { Track(Px(20)), Track(Px(90)), Track(Px(15)) };
+    } else {
+        // Simple: sliders (90) + labels (15)
+        rhythmicGrid.templateRows = { Track(Px(90)), Track(Px(15)) };
+    }
 
-    rhythmicGrid.items.clear();
+    // Determine which sliders are active
+    auto rateLabels = juce::StringArray { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    std::vector<bool> activeStates;
     for (int i = 0; i < rateProbSliders.size(); ++i)
-        rhythmicGrid.items.add(GridItem(*rateProbSliders[i]));
-    rhythmicGrid.performLayout(bounds);
+    {
+        bool isActive = audioProcessor.getParameters().getRawParameterValue("rateActive_" + rateLabels[i])->load() > 0.5f;
+        activeStates.push_back(isActive);
+    }
+
+    // Set up columns based on view mode
+    rhythmicGrid.templateColumns.clear();
+    if (showAdvancedView)
+    {
+        // Advanced view: show all sliders
+        for (int i = 0; i < rateProbSliders.size(); ++i)
+            rhythmicGrid.templateColumns.add(Track(Fr(1)));
+    }
+    else
+    {
+        // Simple view: only active sliders
+        for (int i = 0; i < rateProbSliders.size(); ++i)
+            if (activeStates[i])
+                rhythmicGrid.templateColumns.add(Track(Fr(1)));
+    }
+    rhythmicGrid.columnGap = Px(4);
+    rhythmicGrid.rowGap = Px(4);  // Add spacing between rows
+
+    // Add grid items
+    rhythmicGrid.items.clear();
+    int columnIndex = 1;
+    for (int i = 0; i < rateProbSliders.size(); ++i)
+    {
+        if (showAdvancedView)
+        {
+            // Advanced view: show all, grey out inactive
+            rateActiveButtons[i]->setVisible(true);
+            rateProbSliders[i]->setVisible(true);
+            rateProbLabels[i]->setVisible(true);
+
+            if (!activeStates[i])
+            {
+                rateProbSliders[i]->setAlpha(0.4f);
+                rateProbSliders[i]->setEnabled(false);
+            }
+            else
+            {
+                rateProbSliders[i]->setAlpha(1.0f);
+                rateProbSliders[i]->setEnabled(true);
+            }
+
+            rhythmicGrid.items.add(GridItem(*rateActiveButtons[i]).withArea(1, columnIndex));
+            rhythmicGrid.items.add(GridItem(*rateProbSliders[i]).withArea(2, columnIndex));
+            rhythmicGrid.items.add(GridItem(*rateProbLabels[i]).withArea(3, columnIndex));
+            columnIndex++;
+        }
+        else if (activeStates[i])
+        {
+            // Simple view: only active sliders (NO toggles)
+            rateActiveButtons[i]->setVisible(false);  // Hide toggles in simple view
+            rateProbSliders[i]->setVisible(true);
+            rateProbSliders[i]->setAlpha(1.0f);
+            rateProbSliders[i]->setEnabled(true);
+            rateProbLabels[i]->setVisible(true);
+
+            // No toggle row in simple view - sliders start at row 1
+            rhythmicGrid.items.add(GridItem(*rateProbSliders[i]).withArea(1, columnIndex));
+            rhythmicGrid.items.add(GridItem(*rateProbLabels[i]).withArea(2, columnIndex));
+            columnIndex++;
+        }
+        else
+        {
+            // Hide inactive sliders in simple view
+            rateActiveButtons[i]->setVisible(false);
+            rateProbSliders[i]->setVisible(false);
+            rateProbLabels[i]->setVisible(false);
+        }
+    }
+
+    // Only perform layout if we have valid configuration
+    if (rhythmicGrid.templateColumns.size() > 0 &&
+        rhythmicGrid.items.size() > 0 &&
+        bounds.getWidth() > 0 &&
+        bounds.getHeight() > 0)
+    {
+        rhythmicGrid.performLayout(bounds);
+    }
 
     // Hide manual stutter buttons
     for (int i = 0; i < manualStutterButtons.size(); ++i)
@@ -540,49 +793,115 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
 
     Grid nanoGrid;
 
+    // Determine which sliders are active
+    std::vector<bool> activeStates;
+    for (int i = 0; i < 12; ++i)
+    {
+        bool isActive = audioProcessor.getParameters().getRawParameterValue("nanoActive_" + juce::String(i))->load() > 0.5f;
+        activeStates.push_back(isActive);
+    }
+
     // Set up grid rows based on advanced view state
     if (showAdvancedView)
     {
-        // Advanced view: numerators, denominators, sliders, labels
-        nanoGrid.templateRows = { Track(Px(20)), Track(Px(20)), Track(Px(90)), Track(Px(15)) };
+        // Advanced view: toggles (20) + numerators (20) + denominators (20) + sliders (90) + labels (15)
+        nanoGrid.templateRows = { Track(Px(20)), Track(Px(20)), Track(Px(20)), Track(Px(90)), Track(Px(15)) };
     }
     else
     {
-        // Simple view: sliders and labels only
-        nanoGrid.templateRows = { Track(Px(110)), Track(Px(15)) };
+        // Simple view: sliders (90) + labels (15) - NO toggles
+        nanoGrid.templateRows = { Track(Px(90)), Track(Px(15)) };
     }
 
+    // Set up columns based on view mode
     nanoGrid.templateColumns.clear();
-    for (int i = 0; i < nanoRateProbSliders.size() && i < 12; ++i)
-        nanoGrid.templateColumns.add(Track(Fr(1)));
+    if (showAdvancedView)
+    {
+        // Advanced view: show all sliders
+        for (int i = 0; i < 12; ++i)
+            nanoGrid.templateColumns.add(Track(Fr(1)));
+    }
+    else
+    {
+        // Simple view: only active sliders
+        for (int i = 0; i < 12; ++i)
+            if (activeStates[i])
+                nanoGrid.templateColumns.add(Track(Fr(1)));
+    }
     nanoGrid.columnGap = Px(3);
-    nanoGrid.rowGap = Px(2);
+    nanoGrid.rowGap = Px(4);  // Increased spacing between rows
 
+    // Add grid items
     nanoGrid.items.clear();
+    int columnIndex = 1;
     for (int i = 0; i < nanoRateProbSliders.size() && i < 12; ++i)
     {
         if (showAdvancedView)
         {
-            // Show numerators and denominators
+            // Advanced view: show all, grey out inactive
+            nanoActiveButtons[i]->setVisible(true);
             nanoNumerators[i]->setVisible(true);
             nanoDenominators[i]->setVisible(true);
+            nanoRateProbSliders[i]->setVisible(true);
+            nanoIntervalLabels[i]->setVisible(true);
 
-            nanoGrid.items.add(GridItem(*nanoNumerators[i]).withArea(1, i + 1));
-            nanoGrid.items.add(GridItem(*nanoDenominators[i]).withArea(2, i + 1));
-            nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(3, i + 1));
-            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(4, i + 1));
+            if (!activeStates[i])
+            {
+                nanoRateProbSliders[i]->setAlpha(0.4f);
+                nanoRateProbSliders[i]->setEnabled(false);
+                nanoNumerators[i]->setEnabled(false);
+                nanoDenominators[i]->setEnabled(false);
+            }
+            else
+            {
+                nanoRateProbSliders[i]->setAlpha(1.0f);
+                nanoRateProbSliders[i]->setEnabled(true);
+                nanoNumerators[i]->setEnabled(true);
+                nanoDenominators[i]->setEnabled(true);
+            }
+
+            nanoGrid.items.add(GridItem(*nanoActiveButtons[i]).withArea(1, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoNumerators[i]).withArea(2, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoDenominators[i]).withArea(3, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(4, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(5, columnIndex));
+            columnIndex++;
+        }
+        else if (activeStates[i])
+        {
+            // Simple view: only active sliders (NO toggles)
+            nanoActiveButtons[i]->setVisible(false);  // Hide toggles in simple view
+            nanoNumerators[i]->setVisible(false);
+            nanoDenominators[i]->setVisible(false);
+            nanoRateProbSliders[i]->setVisible(true);
+            nanoRateProbSliders[i]->setAlpha(1.0f);
+            nanoRateProbSliders[i]->setEnabled(true);
+            nanoIntervalLabels[i]->setVisible(true);
+
+            // No toggle row in simple view - sliders start at row 1
+            nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(1, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(2, columnIndex));
+            columnIndex++;
         }
         else
         {
-            // Hide numerators and denominators
+            // Hide inactive sliders in simple view
+            nanoActiveButtons[i]->setVisible(false);
             nanoNumerators[i]->setVisible(false);
             nanoDenominators[i]->setVisible(false);
-
-            nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(1, i + 1));
-            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(2, i + 1));
+            nanoRateProbSliders[i]->setVisible(false);
+            nanoIntervalLabels[i]->setVisible(false);
         }
     }
-    nanoGrid.performLayout(bounds);
+
+    // Only perform layout if we have valid configuration
+    if (nanoGrid.templateColumns.size() > 0 &&
+        nanoGrid.items.size() > 0 &&
+        bounds.getWidth() > 0 &&
+        bounds.getHeight() > 0)
+    {
+        nanoGrid.performLayout(bounds);
+    }
 }
 
 void NanoStuttAudioProcessorEditor::layoutQuantizationControls(juce::Rectangle<int> bounds)
@@ -594,19 +913,101 @@ void NanoStuttAudioProcessorEditor::layoutQuantizationControls(juce::Rectangle<i
     using Fr = Grid::Fr;
 
     Grid quantGrid;
-    quantGrid.templateRows = { Track(Px(55)), Track(Px(12)) };
-    quantGrid.templateColumns.clear();
-    for (int i = 0; i < quantProbSliders.size(); ++i)
-        quantGrid.templateColumns.add(Track(Fr(1)));
-    quantGrid.columnGap = Px(6);
+    // Grid rows depend on view mode
+    if (showAdvancedView) {
+        // Advanced: toggles (20) + sliders (90) + labels (12)
+        quantGrid.templateRows = { Track(Px(20)), Track(Px(90)), Track(Px(12)) };
+    } else {
+        // Simple: sliders (90) + labels (12) - NO toggles
+        quantGrid.templateRows = { Track(Px(90)), Track(Px(12)) };
+    }
 
-    quantGrid.items.clear();
+    // Determine which sliders are active
+    auto quantLabels = juce::StringArray { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
+    std::vector<bool> activeStates;
     for (int i = 0; i < quantProbSliders.size(); ++i)
     {
-        quantGrid.items.add(GridItem(*quantProbSliders[i]).withArea(1, i + 1));
-        quantGrid.items.add(GridItem(*quantProbLabels[i]).withArea(2, i + 1));
+        bool isActive = audioProcessor.getParameters().getRawParameterValue("quantActive_" + quantLabels[i])->load() > 0.5f;
+        activeStates.push_back(isActive);
     }
-    quantGrid.performLayout(bounds);
+
+    // Set up columns based on view mode
+    quantGrid.templateColumns.clear();
+    if (showAdvancedView)
+    {
+        // Advanced view: show all sliders
+        for (int i = 0; i < quantProbSliders.size(); ++i)
+            quantGrid.templateColumns.add(Track(Fr(1)));
+    }
+    else
+    {
+        // Simple view: only active sliders
+        for (int i = 0; i < quantProbSliders.size(); ++i)
+            if (activeStates[i])
+                quantGrid.templateColumns.add(Track(Fr(1)));
+    }
+    quantGrid.columnGap = Px(6);
+    quantGrid.rowGap = Px(4);  // Add spacing between rows
+
+    // Add grid items
+    quantGrid.items.clear();
+    int columnIndex = 1;
+    for (int i = 0; i < quantProbSliders.size(); ++i)
+    {
+        if (showAdvancedView)
+        {
+            // Advanced view: show all, grey out inactive
+            quantActiveButtons[i]->setVisible(true);
+            quantProbSliders[i]->setVisible(true);
+            quantProbLabels[i]->setVisible(true);
+
+            if (!activeStates[i])
+            {
+                quantProbSliders[i]->setAlpha(0.4f);
+                quantProbSliders[i]->setEnabled(false);
+            }
+            else
+            {
+                quantProbSliders[i]->setAlpha(1.0f);
+                quantProbSliders[i]->setEnabled(true);
+            }
+
+            quantGrid.items.add(GridItem(*quantActiveButtons[i]).withArea(1, columnIndex));
+            quantGrid.items.add(GridItem(*quantProbSliders[i]).withArea(2, columnIndex));
+            quantGrid.items.add(GridItem(*quantProbLabels[i]).withArea(3, columnIndex));
+            columnIndex++;
+        }
+        else if (activeStates[i])
+        {
+            // Simple view: only active sliders (NO toggles)
+            quantActiveButtons[i]->setVisible(false);  // Hide toggles in simple view
+            quantProbSliders[i]->setVisible(true);
+            quantProbSliders[i]->setAlpha(1.0f);
+            quantProbSliders[i]->setEnabled(true);
+            quantProbLabels[i]->setVisible(true);
+
+            // No toggle row in simple view - sliders start at row 1
+            quantGrid.items.add(GridItem(*quantProbSliders[i]).withArea(1, columnIndex));
+            quantGrid.items.add(GridItem(*quantProbLabels[i]).withArea(2, columnIndex));
+            columnIndex++;
+        }
+        else
+        {
+            // Hide inactive sliders in simple view
+            quantActiveButtons[i]->setVisible(false);
+            quantProbSliders[i]->setVisible(false);
+            quantProbLabels[i]->setVisible(false);
+        }
+    }
+
+    // Only perform layout if we have valid configuration
+    if (quantGrid.templateColumns.size() > 0 &&
+        quantGrid.items.size() > 0 &&
+        bounds.getWidth() > 0 &&
+        bounds.getHeight() > 0)
+    {
+        quantGrid.performLayout(bounds);
+    }
 }
 
 void NanoStuttAudioProcessorEditor::layoutRightPanel(juce::Rectangle<int> bounds)
@@ -669,29 +1070,44 @@ void NanoStuttAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
 
+    // Bail out if we don't have valid bounds yet (can happen during construction)
+    if (bounds.getWidth() <= 0 || bounds.getHeight() <= 0)
+        return;
+
     // === Top-right corner controls (absolute positioning) ===
     autoStutterIndicator.setBounds(bounds.getWidth() - 158, 5, 28, 22);
     mixModeMenu.setBounds(bounds.getWidth() - 125, 5, 115, 22);
 
     // Calculate main layout areas
-    auto contentBounds = bounds.reduced(8).withTrimmedTop(35); // Leave space for top controls
+    auto contentBounds = bounds.reduced(8).withTrimmedTop(15); // Leave space for top controls
 
     const int leftWidth = 170;
+    const int buttonColumnWidth = 60;
     const int rightWidth = 140;
     const int spacing = 10;
+    const int buttonColumnSpacing = 8;
     const int visualizerHeight = 70;
+    const int tunerHeight = 28;
+    const int tunerGap = 8;
 
     auto leftBounds = juce::Rectangle<int>(
         contentBounds.getX(),
-        contentBounds.getY() - 35,
+        contentBounds.getY() - 15,
         leftWidth,
-        contentBounds.getHeight() - visualizerHeight - spacing + 35
+        contentBounds.getHeight() - visualizerHeight - spacing + 15
     );
 
     auto centerBounds = juce::Rectangle<int>(
         contentBounds.getX() + leftWidth + spacing,
         contentBounds.getY(),
-        contentBounds.getWidth() - leftWidth - rightWidth - 2 * spacing,
+        contentBounds.getWidth() - leftWidth - buttonColumnWidth - rightWidth - spacing - buttonColumnSpacing - buttonColumnSpacing,
+        contentBounds.getHeight() - visualizerHeight - spacing
+    );
+
+    auto buttonColumnBounds = juce::Rectangle<int>(
+        centerBounds.getRight() + buttonColumnSpacing,
+        contentBounds.getY(),
+        buttonColumnWidth,
         contentBounds.getHeight() - visualizerHeight - spacing
     );
 
@@ -710,36 +1126,125 @@ void NanoStuttAudioProcessorEditor::resized()
     );
 
     // Call layout helper methods
-    layoutEnvelopeControls(leftBounds);
+    // Split left bounds into envelope controls and tuner
+    auto envelopeControlsBounds = leftBounds.withTrimmedBottom(tunerHeight + tunerGap + spacing);
+    auto tunerBounds = juce::Rectangle<int>(
+        leftBounds.getX(),
+        leftBounds.getBottom() - tunerHeight - spacing,
+        leftWidth,
+        tunerHeight
+    );
+
+    layoutEnvelopeControls(envelopeControlsBounds);
 
     // Center panel: Rate sliders, Nano controls, and Quantization
-    auto rhythmicBounds = centerBounds.withTrimmedBottom(centerBounds.getHeight() - 100);
-    // Expand bounds to include labels above sliders (attached with attachToComponent)
-    // Move border up and closer to labels
-    rhythmicSlidersBounds = rhythmicBounds.expanded(3, 0).withTop(rhythmicBounds.getY() - 20).withBottom(rhythmicBounds.getBottom() + 2);
+    // Consistent spacing and heights for all sections
+    const int sectionLabelHeight = 18;
+    const int sectionLabelGap = 4;
+    const int uniformSliderHeight = 90;  // Uniform visual height for all sliders (increased from 75)
+    const int sectionGap = 10;  // Gap between sections for better visual separation
 
-    // Advanced view toggle positioned above nano controls
-    auto advancedToggleBounds = centerBounds.withTrimmedTop(100).withHeight(22);
-    advancedViewToggle.setBounds(advancedToggleBounds.withSizeKeepingCentre(120, 22));
+    int currentY = 0;
 
-    auto nanoBounds = centerBounds.withTrimmedTop(130).withHeight(showAdvancedView ? 145 : 140);
-    // Expand bounds to include all nano elements (numerators at top when advanced, labels at bottom)
-    // Conditional sizing to prevent overlap with quant area in advanced view
+    // === Repeat Rates Section ===
+    auto repeatRatesLabelBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(sectionLabelHeight);
+    repeatRatesLabel.setBounds(repeatRatesLabelBounds);
+
+    // === Advanced View Toggle (right-aligned on same line as Repeat Rates label) ===
+    auto advancedToggleBounds = juce::Rectangle<int>(
+        repeatRatesLabelBounds.getRight() - 120,
+        repeatRatesLabelBounds.getY(),
+        120,
+        18  // Slightly shorter to fit with label
+    );
+    advancedViewToggle.setBounds(advancedToggleBounds);
+
+    currentY += sectionLabelHeight + sectionLabelGap;
+
+    // Grid layout height depends on view mode (includes rowGap spacing: 4px between rows)
+    int rhythmicTotalHeight = showAdvancedView ? (20 + uniformSliderHeight + 15 + 8) : (uniformSliderHeight + 15 + 4);
+    auto rhythmicBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(rhythmicTotalHeight);
+
+    // Border includes toggles (advanced only), sliders, and labels (section label outside)
+    // Add more padding in advanced view for toggle buttons
     if (showAdvancedView) {
-        // More top spacing for numerators, less bottom to avoid overlap
-        nanoSlidersBounds = nanoBounds.expanded(3, 0).withTop(nanoBounds.getY() - 10).withBottom(nanoBounds.getBottom() + 6);
+        rhythmicSlidersBounds = rhythmicBounds.expanded(4, 0)
+            .withTop(rhythmicBounds.getY() - 4)
+            .withBottom(rhythmicBounds.getBottom() + 6);
     } else {
-        // Less room at bottom for interval labels only
-        nanoSlidersBounds = nanoBounds.expanded(3, 0).withTop(nanoBounds.getY() - 2).withBottom(nanoBounds.getBottom() + 8);
+        rhythmicSlidersBounds = rhythmicBounds.expanded(3, 0)
+            .withTop(rhythmicBounds.getY())
+            .withBottom(rhythmicBounds.getBottom() + 6);
+    }
+    currentY += rhythmicTotalHeight + sectionGap;
+
+    // === Nano Rates Section ===
+    auto nanoRatesLabelBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(sectionLabelHeight);
+    nanoRatesLabel.setBounds(nanoRatesLabelBounds);
+    currentY += sectionLabelHeight + sectionLabelGap;
+
+    // Nano bounds height depends on advanced view state (includes rowGap spacing: 4px between rows)
+    int nanoTotalHeight;
+    if (showAdvancedView) {
+        // Advanced: toggles (20) + numerators (20) + denominators (20) + sliders (90) + labels (15) + gaps (4×4=16)
+        nanoTotalHeight = 20 + 20 + 20 + uniformSliderHeight + 15 + 16;
+    } else {
+        // Simple: sliders (90) + labels (15) + gaps (4)
+        nanoTotalHeight = uniformSliderHeight + 15 + 4;
     }
 
-    auto quantBounds = centerBounds.withTrimmedTop(showAdvancedView ? 285 : 280).withHeight(70);
-    auto tunerBounds = centerBounds.withTrimmedTop(showAdvancedView ? 360 : 355).withHeight(35);
+    auto nanoBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(nanoTotalHeight);
+    // Border includes all nano content (toggles in advanced view, sliders, labels)
+    // Add more padding in advanced view for toggle buttons
+    if (showAdvancedView) {
+        nanoSlidersBounds = nanoBounds.expanded(4, 0)
+            .withTop(nanoBounds.getY() - 4)
+            .withBottom(nanoBounds.getBottom() + 6);
+    } else {
+        nanoSlidersBounds = nanoBounds.expanded(3, 0)
+            .withTop(nanoBounds.getY())
+            .withBottom(nanoBounds.getBottom() + 6);
+    }
+    currentY += nanoTotalHeight + sectionGap;
+
+    // === Quantization Section ===
+    auto quantizationLabelBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(sectionLabelHeight);
+    quantizationLabel.setBounds(quantizationLabelBounds);
+    currentY += sectionLabelHeight + sectionLabelGap;
+
+    // Quant height depends on view mode (includes rowGap spacing: 4px between rows)
+    int quantTotalHeight = showAdvancedView ? (20 + uniformSliderHeight + 12 + 8) : (uniformSliderHeight + 12 + 4);
+    auto quantBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(quantTotalHeight);
+
+    // Add conditional border padding for quantization section (not shown in visible area, but for consistency)
+    // Note: Quantization section border is not currently drawn in paint(), but keeping pattern consistent
 
     layoutRateSliders(rhythmicBounds);
     layoutNanoControls(nanoBounds);
     layoutQuantizationControls(quantBounds);
+
+    // Position tuner in left panel
     tuner.setBounds(tunerBounds);
+
+    // Position buttons in vertical column between center and right panels
+    const int buttonWidth = 55;
+    const int buttonHeight = 24;
+    const int buttonSpacing = 8;
+    const int buttonX = buttonColumnBounds.getX() + (buttonColumnBounds.getWidth() - buttonWidth) / 2;
+
+    // Align buttons with their respective slider sections (vertically centered within slider area)
+    int rhythmicButtonY = rhythmicBounds.getY() + (rhythmicBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2;
+    int nanoButtonY = nanoBounds.getY() + (nanoBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2;
+    int quantButtonY = quantBounds.getY() + (quantBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2;
+
+    resetRateProbButton.setBounds(buttonX, rhythmicButtonY, buttonWidth, buttonHeight);
+    randomizeRateProbButton.setBounds(buttonX, rhythmicButtonY + buttonHeight + buttonSpacing, buttonWidth, buttonHeight);
+
+    resetNanoProbButton.setBounds(buttonX, nanoButtonY, buttonWidth, buttonHeight);
+    randomizeNanoProbButton.setBounds(buttonX, nanoButtonY + buttonHeight + buttonSpacing, buttonWidth, buttonHeight);
+
+    resetQuantProbButton.setBounds(buttonX, quantButtonY, buttonWidth, buttonHeight);
+    randomizeQuantProbButton.setBounds(buttonX, quantButtonY + buttonHeight + buttonSpacing, buttonWidth, buttonHeight);
 
     layoutRightPanel(rightBounds);
     layoutVisualizer(visualizerBounds);

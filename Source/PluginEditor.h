@@ -27,30 +27,74 @@ public:
     void paint(juce::Graphics& g) override
     {
         g.fillAll(juce::Colours::black);
-        g.setColour(juce::Colours::lime);
 
-        const auto& buffer = processor.getStutterBuffer();
-        const int numSamples = buffer.getNumSamples();
-        const int channel = 0; // just show left or mono mix
+        const auto& buffer = processor.getOutputBuffer();
+        const auto& stateBuffer = processor.getStutterStateBuffer();
+        const int bufferSize = processor.getOutputBufferSize();
+        const int writePos = processor.getOutputBufferWritePos();
 
-        if (numSamples == 0 || buffer.getNumChannels() == 0)
+        if (bufferSize == 0 || buffer.getNumChannels() == 0)
             return;
 
-        const float* data = buffer.getReadPointer(juce::jmin(channel, buffer.getNumChannels() - 1));
-        juce::Path path;
+        // Draw waveform with color-coding - display entire buffer directly (index 0 to bufferSize)
+        const int channel = 0; // Show left/mono
         const float midY = getHeight() / 2.0f;
-        const float scaleX = static_cast<float>(getWidth()) / numSamples;
-        const float scaleY = midY;
+        const float scaleY = midY * 0.8f;
 
-        path.startNewSubPath(0, midY - data[0] * scaleY);
-        for (int i = 1; i < numSamples; ++i)
+        // Sample every N samples for efficiency (adjust based on width)
+        const int sampleStep = juce::jmax(1, bufferSize / (getWidth() * 2));
+
+        // Define colors matching AutoStutterIndicator
+        const juce::Colour colorNone = juce::Colours::lime;           // Green
+        const juce::Colour colorRepeat = juce::Colour(0xffff9933);    // Orange
+        const juce::Colour colorNano = juce::Colour(0xff9966ff);      // Purple
+
+        // Build colored segments - display buffer directly
+        int currentState = -1;
+        juce::Path currentPath;
+        juce::Colour currentColor = colorNone;
+
+        for (int i = 0; i < bufferSize; i += sampleStep)
         {
-            float x = i * scaleX;
-            float y = midY - data[i] * scaleY;
-            path.lineTo(x, y);
+            float sample = buffer.getSample(channel, i);
+            int state = stateBuffer[i];
+
+            float x = (static_cast<float>(i) / bufferSize) * getWidth();
+            float y = midY - sample * scaleY;
+
+            // Check if state changed - start new path segment
+            if (state != currentState)
+            {
+                // Draw previous segment if it exists
+                if (!currentPath.isEmpty())
+                {
+                    g.setColour(currentColor);
+                    g.strokePath(currentPath, juce::PathStrokeType(1.5f));
+                }
+
+                // Start new segment
+                currentState = state;
+                currentColor = (state == 0) ? colorNone : (state == 1) ? colorRepeat : colorNano;
+                currentPath.clear();
+                currentPath.startNewSubPath(x, y);
+            }
+            else
+            {
+                currentPath.lineTo(x, y);
+            }
         }
 
-        g.strokePath(path, juce::PathStrokeType(1.0f));
+        // Draw final segment
+        if (!currentPath.isEmpty())
+        {
+            g.setColour(currentColor);
+            g.strokePath(currentPath, juce::PathStrokeType(1.5f));
+        }
+
+        // Draw playhead indicator (vertical line showing current write position)
+        float playheadX = (static_cast<float>(writePos) / bufferSize) * getWidth();
+        g.setColour(juce::Colours::white.withAlpha(0.7f));
+        g.drawLine(playheadX, 0, playheadX, static_cast<float>(getHeight()), 2.0f);
     }
 
 private:
@@ -181,10 +225,23 @@ public:
     juce::OwnedArray<juce::Slider> quantProbSliders;
     juce::OwnedArray<juce::Label> quantProbLabels;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> quantProbAttachments;
+
+    // Visibility toggle buttons (eye icons)
+    juce::OwnedArray<juce::TextButton> rateActiveButtons;
+    juce::OwnedArray<juce::TextButton> nanoActiveButtons;
+    juce::OwnedArray<juce::TextButton> quantActiveButtons;
+
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> rateActiveAttachments;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> nanoActiveAttachments;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> quantActiveAttachments;
+
     juce::Label chanceLabel, reverseLabel, quantLabel;
     juce::Label nanoGateLabel, nanoShapeLabel, nanoSmoothLabel;
     juce::Label macroGateLabel, macroShapeLabel, macroSmoothLabel;
     juce::Label nanoControlsLabel, macroControlsLabel;
+
+    // Section labels for slider groups
+    juce::Label repeatRatesLabel, nanoRatesLabel, quantizationLabel;
 
     juce::ComboBox mixModeMenu;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mixModeAttachment;
@@ -244,7 +301,16 @@ private:
     void layoutRightPanel(juce::Rectangle<int> bounds);
     void layoutVisualizer(juce::Rectangle<int> bounds);
     std::vector<std::unique_ptr<juce::TextButton>> manualStutterButtons;
-    std::vector<int> manualStutterRates { 4, 3, 6, 8, 12, 16, 24, 32 }; // Denominators
+    std::vector<double> manualStutterRates { 1.0, 4.0/3.0, 2.0, 3.0, 4.0, 6.0, 16.0/3.0, 8.0, 12.0, 16.0, 24.0, 32.0 }; // Denominators
+
+    // Reset and Randomize buttons for probability sliders
+    juce::TextButton resetRateProbButton;
+    juce::TextButton randomizeRateProbButton;
+    juce::TextButton resetNanoProbButton;
+    juce::TextButton randomizeNanoProbButton;
+    juce::TextButton resetQuantProbButton;
+    juce::TextButton randomizeQuantProbButton;
+
     // This reference is provided as a quick way for your editor to
     // access the processor object that created it.
     NanoStuttAudioProcessor& audioProcessor;

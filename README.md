@@ -77,7 +77,16 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 - **Optimized Spacing**: Expanded nano section with improved text box and slider proportions
 
 ### Visual Feedback
-- **Stutter Visualizer**: Real-time waveform display of current stutter buffer contents
+- **DAW-Synced Output Visualizer**: Real-time waveform display showing final processed output
+  - **Fixed 1/4 Note Window**: Displays exactly one quarter note of audio at current BPM
+  - **DAW Synchronization**: PPQ-based positioning ensures perfect timeline alignment
+  - **Color-Coded States**: Waveform colors indicate stutter type
+    - Green: Clean audio (no stutter)
+    - Orange: Repeat rate stutter active
+    - Purple: Nano rate stutter active
+  - **Playhead Indicator**: White vertical line shows current write position
+  - **Dynamic Buffer Sizing**: Automatically adjusts window size on BPM changes
+  - **Gap-Free Rendering**: Anti-aliasing ensures smooth waveform display at all BPMs
 
 ### Timing Controls
 - **Timing Offset**: Manual timing offset parameter (-100ms to +100ms) for master track delay compensation in Ableton Live
@@ -150,7 +159,7 @@ make -j4
 - ✅ Pre-emptive fade system with click elimination
 - ✅ Dual envelope architecture (Nano + Macro)
 - ✅ All three mix modes (Gate, Insert, Mix)
-- ✅ Visual stutter buffer display
+- ✅ **DAW-synced output visualizer** - color-coded waveform display with perfect timeline alignment
 - ✅ Host synchronization and tempo tracking
 - ✅ Real-time parameter automation
 - ✅ Clean CMake build system
@@ -158,7 +167,14 @@ make -j4
 ### Known Issues
 - Manual stutter buttons may need GUI integration
 
-### Recent Improvements (Last Commit: 0ac1e56)
+### Recent Improvements
+- **Implemented DAW-synced output visualizer** - displays final processed audio with perfect timeline alignment
+  - Fixed 1/4 note viewing window sized to current BPM
+  - PPQ-based buffer positioning for sample-accurate synchronization
+  - Color-coded waveform indicating stutter state (green/orange/purple)
+  - Playhead indicator showing current write position
+  - Anti-aliasing gap-filling for smooth waveform rendering
+  - Dynamic buffer resizing on BPM changes
 - **Implemented JUCE DSP-based waveshaping** - switched from manual processing to JUCE DSP objects for consistency
 - **Added proper wavefolding algorithm** - maintains strict ±1.0 bounds with correct signal reflection
 - **Replaced Waveshape Intensity with Drive** - now controls input gain for more intuitive saturation control

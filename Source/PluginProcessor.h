@@ -60,6 +60,12 @@ public:
     juce::AudioProcessorValueTreeState& getParameters() { return parameters; }
     const juce::AudioBuffer<float>& getStutterBuffer() const { return stutterBuffer; }
 
+    // Output visualization accessors
+    const juce::AudioBuffer<float>& getOutputBuffer() const { return outputBuffer; }
+    const std::vector<int>& getStutterStateBuffer() const { return stutterStateBuffer; }
+    int getOutputBufferWritePos() const { return outputBufferWritePos.load(); }
+    int getOutputBufferSize() const { return outputBufferMaxSamples; }
+
     void setManualStutterRate(int rate) { manualStutterRateDenominator = rate; }
     void setManualStutterTriggered(bool triggered) { manualStutterTriggered = triggered; }
     void setAutoStutterActive(bool active) { autoStutterActive = active; }
@@ -99,6 +105,14 @@ private:
     juce::AudioBuffer<float> stutterBuffer;
     juce::AudioProcessorValueTreeState parameters;
 
+    // ==== Output visualization buffers ====
+    juce::AudioBuffer<float> outputBuffer;              // Ring buffer for output visualization (sized to 1/4 note)
+    std::vector<int> stutterStateBuffer;                // Stutter state per sample (0=none, 1=repeat, 2=nano)
+    std::atomic<int> outputBufferWritePos {0};          // Current write position in output buffer
+    int outputBufferMaxSamples = 0;                     // Current size of output buffer (1/4 note at current BPM)
+    double lastKnownBpm = 120.0;                        // Track BPM for dynamic buffer resizing
+    int lastOutputWriteIndex = -1;                      // Track last write position for gap filling
+
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
 
@@ -134,9 +148,9 @@ private:
     int macroEnvelopeLengthInSamples = 0;
     
     // Cached parameters for real-time-safe access
-    std::array<float, 8> regularRateWeights {{ 0.0f }};
+    std::array<float, 12> regularRateWeights {{ 0.0f }};
     std::array<float, 12> nanoRateWeights {{ 0.0f }};
-    std::array<float, 4> quantUnitWeights {{ 0.0f }};
+    std::array<float, 9> quantUnitWeights {{ 0.0f }};
     float nanoBlend = 0.0f;
 
     // Sample-and-hold envelope parameters (sampled to keep event-locked behavior)
@@ -204,7 +218,7 @@ private:
     int heldNanoEnvelopeLengthInSamples = 0;    // Pre-calculated nano envelope length per cycle
 
     // Ratio/denominator lookup
-    static constexpr std::array<int, 8> regularDenominators {{ 4, 3, 6, 8, 12, 16, 24, 32 }};
+    static constexpr std::array<double, 12> regularDenominators {{ 1.0, 4.0/3.0, 2.0, 3.0, 4.0, 6.0, 16.0/3.0, 8.0, 12.0, 16.0, 24.0, 32.0 }};
     static constexpr std::array<float, 12> nanoRatios {{
         1.0f,
         15.0f / 16.0f,
@@ -222,6 +236,9 @@ private:
     void initializeParameterListeners();
     void parameterChanged(const juce::String& parameterID, float newValue) override;
     void updateWaveshaperFunction(int algorithm, float drive, bool gainCompensation);
+
+    // Output buffer management
+    void resizeOutputBufferForBpm(double bpm, double sampleRate);
 
     // Weighted probability selection utility
     template<typename Container>

@@ -102,6 +102,9 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
     fadeLengthInSamples = static_cast<int>(sampleRate * FADE_DURATION_SECONDS);
 
+    // Initialize output visualization buffer (dynamically sized to 1/4 note at current BPM)
+    resizeOutputBufferForBpm(120.0, sampleRate);
+
     // Initialize JUCE DSP ProcessorChain
     dspSpec.sampleRate = sampleRate;
     dspSpec.maximumBlockSize = static_cast<juce::uint32>(samplesPerBlock);
@@ -223,13 +226,18 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     if (transportJustStarted || positionJumped) {
         // Reset quantization alignment based on new PPQ position
         // Find the smallest active quantization unit to align to its grid
-        static const std::array<double, 4> quantUnits = {
-            QUARTER_NOTE_PPQ,         // 1/4
+        static const std::array<double, 9> quantUnits = {
+            QUARTER_NOTE_PPQ * 16.0,       // 4bar
+            QUARTER_NOTE_PPQ * 8.0,        // 2bar
+            QUARTER_NOTE_PPQ * 4.0,        // 1bar
+            QUARTER_NOTE_PPQ * 2.0,        // 1/2
+            QUARTER_NOTE_PPQ,              // 1/4
+            QUARTER_NOTE_PPQ * 0.75,       // d1/8 (dotted eighth)
             THIRTY_SECOND_NOTE_PPQ * 2.0,  // 1/8
             THIRTY_SECOND_NOTE_PPQ,        // 1/16
             THIRTY_SECOND_NOTE_PPQ / 2.0   // 1/32
         };
-        static const std::array<int, 4> quantToNewBeatValues = {8, 4, 2, 1}; // 1/32nds per unit
+        static const std::array<int, 9> quantToNewBeatValues = {128, 64, 32, 16, 8, 6, 4, 2, 1}; // 1/32nds per unit
 
         // Find smallest active quantization unit (highest frequency)
         double activeQuantUnit = THIRTY_SECOND_NOTE_PPQ * 2.0; // Default to 1/8th
@@ -241,6 +249,12 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             if (cachedQuantWeights[i-1] > 0.0f) {
                 activeQuantUnit = quantUnits[i-1];
                 activeQuantToNewBeat = quantToNewBeatValues[i-1];
+
+                // Debug output for transport restart quantization
+                static const std::array<const char*, 9> quantLabels = {"4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32"};
+                DBG("[TRANSPORT RESTART] Active quant unit: " << quantLabels[i-1] << " (index " << (i-1)
+                    << ") | quantToNewBeat: " << activeQuantToNewBeat);
+
                 break; // Found smallest (work backwards from 1/32 to 1/4)
             }
         }
@@ -302,6 +316,12 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             bpm = position->getBpm().orFallback(120.0);
         }
 
+    // Check if BPM changed and resize output buffer if needed
+    if (std::abs(bpm - lastKnownBpm) > 0.01) // Small threshold to avoid constant resizing
+    {
+        resizeOutputBufferForBpm(bpm, sampleRate);
+    }
+
     // Apply timing offset for master track delay compensation
     // NOTE: Applied AFTER transport state tracking to avoid corrupting jump detection
     float timingOffsetMs = parameters.getRawParameterValue("TimingOffset")->load();
@@ -310,7 +330,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     ppqAtStartOfBlock += timingOffsetPpq;
 
     double ppqPerSample = (bpm / SECONDS_PER_MINUTE) / sampleRate;
-    double quantUnit = 1.0 / std::pow(2.0, currentQuantIndex);
 
     // True stereo buffer capture - preserve stereo separation with circular buffer handling
     if (maxStutterLenSamples > 0 && numSamples > 0) {
@@ -416,10 +435,16 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Update quantization from previous decision
                 if (currentQuantIndex != nextQuantIndex) {
                     currentQuantIndex = nextQuantIndex;
-                    quantUnit = 1.0 / std::pow(2.0, currentQuantIndex);
-                    quantToNewBeat = static_cast<int>(quantUnit / staticQuantUnit); // How many 1/32nds in chosen quant
-                    quantToNewBeat = std::max(1, quantToNewBeat); // Ensure at least 1
 
+                    // Use lookup table for quantToNewBeat values (matches quantization system)
+                    // Array order: 4bar, 2bar, 1bar, 1/2, 1/4, d1/8, 1/8, 1/16, 1/32
+                    static const std::array<int, 9> quantToNewBeatValues = {128, 64, 32, 16, 8, 6, 4, 2, 1};
+                    quantToNewBeat = quantToNewBeatValues[currentQuantIndex];
+
+                    // Debug output
+                    static const std::array<const char*, 9> quantLabels = {"4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32"};
+                    DBG("[QUANT UPDATE] Index: " << currentQuantIndex << " (" << quantLabels[currentQuantIndex]
+                        << ") | quantToNewBeat: " << quantToNewBeat);
                 }
                 
                 // Reset quantCount based on current position, not arbitrarily to 0
@@ -527,9 +552,18 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 }
 
                 // DECIDE NEXT QUANTIZATION UNIT for future events
-                nextQuantIndex = selectWeightedIndex(cachedQuantWeights, 1); // Default to 1/8
+                // Default to 1/8th (index 6, not 1!) when all weights are 0
+                nextQuantIndex = selectWeightedIndex(cachedQuantWeights, 6);
 
-                
+                // Debug output for quant selection
+                static const std::array<const char*, 9> quantLabels = {"4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32"};
+                DBG("[QUANT SELECT] Index: " << nextQuantIndex << " (" << quantLabels[nextQuantIndex] << ") | "
+                    << "Weights: [" << cachedQuantWeights[0] << "," << cachedQuantWeights[1] << ","
+                    << cachedQuantWeights[2] << "," << cachedQuantWeights[3] << "," << cachedQuantWeights[4] << ","
+                    << cachedQuantWeights[5] << "," << cachedQuantWeights[6] << "," << cachedQuantWeights[7] << ","
+                    << cachedQuantWeights[8] << "]");
+
+
             }
                 
         }
@@ -1084,6 +1118,49 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             }
 
             buffer.setSample(ch, i, outputSample);
+
+            // Copy final output to visualization buffer (only once per sample, not per channel)
+            if (ch == 0 && outputBufferMaxSamples > 0)
+            {
+                // Calculate write position directly from PPQ (modulo 1.0 gives position within quarter note)
+                double currentPpqForSample = ppqAtStartOfBlock + (i * ppqPerSample);
+                double ppqWithinQuarter = currentPpqForSample - std::floor(currentPpqForSample);
+                int writeIndex = static_cast<int>(ppqWithinQuarter * outputBufferMaxSamples) % outputBufferMaxSamples;
+
+                // Determine stutter state for visualization (0=none, 1=repeat, 2=nano)
+                int currentState = 0;
+                if (autoStutterActive)
+                {
+                    currentState = currentlyUsingNanoRate.load() ? 2 : 1;
+                }
+
+                // Fill gaps between last write and current write to avoid aliasing
+                // Skip gap-filling during wraparound (quarter note boundary crossing)
+                if (lastOutputWriteIndex >= 0 && lastOutputWriteIndex != writeIndex && writeIndex > lastOutputWriteIndex)
+                {
+                    // Only fill gaps within the same quarter note (no wraparound)
+                    int gapStart = lastOutputWriteIndex + 1;
+                    for (int idx = gapStart; idx < writeIndex; ++idx)
+                    {
+                        for (int outCh = 0; outCh < totalNumOutputChannels && outCh < outputBuffer.getNumChannels(); ++outCh)
+                        {
+                            outputBuffer.setSample(outCh, idx, buffer.getSample(outCh, i));
+                        }
+                        stutterStateBuffer[idx] = currentState;
+                    }
+                }
+
+                // Store output sample and state at writeIndex
+                for (int outCh = 0; outCh < totalNumOutputChannels && outCh < outputBuffer.getNumChannels(); ++outCh)
+                {
+                    outputBuffer.setSample(outCh, writeIndex, buffer.getSample(outCh, i));
+                }
+                stutterStateBuffer[writeIndex] = currentState;
+
+                // Update tracking for next iteration
+                lastOutputWriteIndex = writeIndex;
+                outputBufferWritePos.store(writeIndex);
+            }
         }
 
         // UPDATE COUNTERS (after all channels have been processed with same indices)
@@ -1279,7 +1356,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 1));
 
     // Quant unit probability parameters
-    auto quantLabels = juce::StringArray { "1/4", "1/8", "1/16", "1/32" };
+    auto quantLabels = juce::StringArray { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
     for (int i = 0; i < quantLabels.size(); ++i)
     {
         juce::String id = "quantProb_" + quantLabels[i];
@@ -1287,7 +1364,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1), id, 0.0f, 1.0f, defaultValue));
     }
 
-    auto rateLabels = juce::StringArray { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    auto rateLabels = juce::StringArray { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
     for (const auto& label : rateLabels)
     {
         juce::String id = "rateProb_" + label;
@@ -1342,30 +1419,73 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("GainCompensation", 1), "Gain Compensation", false));
 
+    // Visibility/Active state parameters for repeat rates
+    // Defaults: 1/6 through 1/32 active (indices 5-11)
+    for (int i = 0; i < rateLabels.size(); ++i)
+    {
+        bool defaultActive = (i >= 5); // Indices 5-11: "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32"
+        juce::String id = "rateActive_" + rateLabels[i];
+        params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(id, 1), id, defaultActive));
+    }
+
+    // Visibility/Active state parameters for nano rates
+    // Defaults: minor scale active (indices 0, 2, 3, 5, 7, 8, 10)
+    for (int i = 0; i < 12; ++i)
+    {
+        // Natural minor scale intervals: root, maj2, min3, P4, P5, min6, min7
+        bool defaultActive = (i == 0 || i == 2 || i == 3 || i == 5 || i == 7 || i == 8 || i == 10);
+        juce::String id = "nanoActive_" + juce::String(i);
+        params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(id, 1), id, defaultActive));
+    }
+
+    // Visibility/Active state parameters for quantization
+    // Defaults: 1/2 through 1/16 active (indices 3-7)
+    for (int i = 0; i < quantLabels.size(); ++i)
+    {
+        bool defaultActive = (i >= 3 && i <= 7); // Indices 3-7: "1/2", "1/4", "d1/8", "1/8", "1/16"
+        juce::String id = "quantActive_" + quantLabels[i];
+        params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(id, 1), id, defaultActive));
+    }
+
     return { params.begin(), params.end() };
 }
 
 void NanoStuttAudioProcessor::updateCachedParameters()
 {
-    static const std::array<std::string, 8> regularLabels = { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
-    static const std::array<std::string, 4> quantLabels = { "1/4", "1/8", "1/16", "1/32" };
-   
+    static const std::array<std::string, 12> regularLabels = { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    static const std::array<std::string, 9> quantLabels = { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
+
+    // Update regular rate weights, respecting active state
     for (size_t i = 0; i < regularLabels.size(); ++i)
-        regularRateWeights[i] = parameters.getRawParameterValue("rateProb_" + regularLabels[i])->load();
+    {
+        float weight = parameters.getRawParameterValue("rateProb_" + regularLabels[i])->load();
+        bool isActive = parameters.getRawParameterValue("rateActive_" + regularLabels[i])->load() > 0.5f;
+        regularRateWeights[i] = isActive ? weight : 0.0f;
+    }
 
+    // Update nano rate weights, respecting active state
     for (int i = 0; i < 12; ++i)
-        nanoRateWeights[i] = parameters.getRawParameterValue("nanoProb_" + std::to_string(i))->load();
+    {
+        float weight = parameters.getRawParameterValue("nanoProb_" + std::to_string(i))->load();
+        bool isActive = parameters.getRawParameterValue("nanoActive_" + std::to_string(i))->load() > 0.5f;
+        nanoRateWeights[i] = isActive ? weight : 0.0f;
+    }
 
+    // Update quantization weights, respecting active state
     for (size_t i = 0; i < quantLabels.size(); ++i)
-        quantUnitWeights[i] = parameters.getRawParameterValue("quantProb_" + quantLabels[i])->load();
+    {
+        float weight = parameters.getRawParameterValue("quantProb_" + quantLabels[i])->load();
+        bool isActive = parameters.getRawParameterValue("quantActive_" + quantLabels[i])->load() > 0.5f;
+        quantUnitWeights[i] = isActive ? weight : 0.0f;
+    }
 
     nanoBlend = parameters.getRawParameterValue("nanoBlend")->load();
 }
 
 void NanoStuttAudioProcessor::initializeParameterListeners()
 {
-    static const std::array<std::string, 8> regularLabels = { "1/4", "1/3", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
-    static const std::array<std::string, 4> quantLabels = { "1/4", "1/8", "1/16", "1/32" };
+    static const std::array<std::string, 12> regularLabels = { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    static const std::array<std::string, 9> quantLabels = { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
 
     for (const auto& label : regularLabels)
         parameters.addParameterListener("rateProb_" + label, this);
@@ -1379,6 +1499,16 @@ void NanoStuttAudioProcessor::initializeParameterListeners()
     for (int i = 0; i < 12; ++i)
         parameters.addParameterListener("nanoRatio_" + std::to_string(i), this);
 
+    // Add listeners for active state parameters
+    for (const auto& label : regularLabels)
+        parameters.addParameterListener("rateActive_" + label, this);
+
+    for (int i = 0; i < 12; ++i)
+        parameters.addParameterListener("nanoActive_" + std::to_string(i), this);
+
+    for (const auto& label : quantLabels)
+        parameters.addParameterListener("quantActive_" + label, this);
+
     parameters.addParameterListener("nanoBlend", this);
     parameters.addParameterListener("TimingOffset", this);
     parameters.addParameterListener("WaveshapeAlgorithm", this);
@@ -1391,4 +1521,27 @@ void NanoStuttAudioProcessor::initializeParameterListeners()
 void NanoStuttAudioProcessor::parameterChanged(const juce::String&, float)
 {
     updateCachedParameters();
+}
+
+void NanoStuttAudioProcessor::resizeOutputBufferForBpm(double bpm, double sampleRate)
+{
+    if (bpm <= 0.0 || sampleRate <= 0.0)
+        return;
+
+    // Calculate samples needed for EXACTLY 1/4 note at this BPM
+    double secondsPerQuarterNote = 60.0 / bpm;
+    int newBufferSize = static_cast<int>(std::ceil(secondsPerQuarterNote * sampleRate));
+
+    // Clamp to reasonable bounds (min 1 second, max 10 seconds worth of samples)
+    newBufferSize = juce::jlimit(static_cast<int>(sampleRate), static_cast<int>(sampleRate * 10), newBufferSize);
+
+    if (newBufferSize != outputBufferMaxSamples)
+    {
+        outputBufferMaxSamples = newBufferSize;
+        outputBuffer.setSize(getTotalNumOutputChannels(), outputBufferMaxSamples, false, true, true);
+        stutterStateBuffer.resize(outputBufferMaxSamples, 0);
+        outputBufferWritePos.store(0);
+        lastOutputWriteIndex = -1;  // Reset for new buffer
+        lastKnownBpm = bpm;
+    }
 }
