@@ -50,13 +50,15 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 ### Envelope Controls
 
 #### Nano Envelope (Internal Loop Control)
-- **Nano Gate**: Loop duration control (0.0-1.0)
-- **Nano Shape**: Loop envelope curve (0.0-1.0)
-- **Nano Smooth**: Crossfade between loop repetitions (0.0-1.0) - eliminates internal clicks
+- **Nano Gate**: Loop duration control (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
+- **Nano Shape**: Loop envelope curve (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
+- **Nano Octave**: Octave offset control (-1 to +3, integer steps) with randomization (±4 octaves) for pitch shifting effects
+- **Nano Smooth**: EMA low-pass filter (0.0-1.0) - exponential moving average smoothing with alpha coefficient mapping (0.0 = bypass, 1.0 = maximum smoothing)
+- **Cycle Crossfade**: Smoothing at nano cycle boundaries (0.0-1.0) - enables continuous EMA state through loop wraparound
 
 #### Macro Envelope (Event-level Control)
-- **Macro Gate**: Overall event duration (0.0-1.0)
-- **Macro Shape**: Event envelope curve (0.0-1.0)
+- **Macro Gate**: Overall event duration (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
+- **Macro Shape**: Event envelope curve (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
 - **Macro Smooth**: Event boundary smoothing (0.0-1.0)
 
 ### Mix Modes
@@ -168,6 +170,22 @@ make -j4
 - Manual stutter buttons may need GUI integration
 
 ### Recent Improvements
+- **Implemented Nano Smooth EMA Filter** - replaced simple crossfade with exponential moving average low-pass filter
+  - Configurable alpha coefficient: 0.0 = bypass (alpha=1.0), 1.0 = max smooth (alpha=0.05)
+  - Per-channel EMA state tracking with smart reset at loop wraparound
+  - Separate dry EMA state for seamless crossfade transitions
+  - State transfer from dry crossfade to wet processing scaled by first sample envelope gain
+  - Configurable signal chain position (BeforeNanoEnvelope/AfterNanoEnvelope/AfterMacroEnvelope)
+- **Added Cycle Crossfade Control** - smoothing transitions at nano cycle boundaries
+  - Parameter range 0.0-1.0 for adjustable crossfade intensity
+  - Integrated with EMA state management for continuous smoothing through cycle transitions
+  - When crossfade > 0.01, EMA state persists through loop wraparound for seamless transitions
+- **Added Octave Offset and Randomization** - pitch shifting control for nano rates
+  - Octave offset parameter: -1 to +3 octaves with integer snapping
+  - Randomization range: ±4 octaves with bipolar/unipolar modes
+  - Integer-only random generation at Decision Point 2 for event-locked behavior
+  - Applied via octave multiplier (pow(2.0, octave)) to nano frequency calculation
+  - Enhanced DualSlider component with setVisualRangeScale() and setRandomSensitivity() for integer parameters
 - **Implemented DAW-synced output visualizer** - displays final processed audio with perfect timeline alignment
   - Fixed 1/4 note viewing window sized to current BPM
   - PPQ-based buffer positioning for sample-accurate synchronization
