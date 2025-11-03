@@ -98,6 +98,21 @@ private:
     static constexpr float MACRO_SMOOTH_SCALE = 0.3f;
     static constexpr float NANO_SMOOTH_SCALE = 0.25f;
 
+    // EMA Filter Constants
+    static constexpr float NANO_EMA_MIN_ALPHA = 0.05f;  // Maximum smoothing (at knob=1.0)
+    static constexpr float NANO_EMA_ALPHA_RANGE = 0.95f; // Range: 0.05-1.0
+
+    // EMA Signal Chain Position (for testing - change to test different positions)
+    enum class EmaPosition {
+        BeforeNanoEnvelope,      // Position A: After buffer read, before nano envelope
+        AfterNanoEnvelope,       // Position B: After nano envelope, before macro envelope
+        AfterMacroEnvelope       // Position C: After macro envelope (final wet signal)
+    };
+    static constexpr EmaPosition NANO_EMA_POSITION = EmaPosition::AfterNanoEnvelope;
+
+    // Cycle Crossfade Constants
+    static constexpr float CYCLE_CROSSFADE_MAX_PERCENT = 0.1f;  // 10% max of loop length
+
     // Buffer Constants
     static constexpr double MAX_STUTTER_BUFFER_SECONDS = 3.0;
 
@@ -161,6 +176,7 @@ private:
     float currentNanoGateParam = 1.0f;
     float currentNanoShapeParam = 0.5f;
     float currentNanoSmoothParam = 0.0f;
+    float currentNanoOctaveParam = 0.0f;
 
     // Next event parameters - sampled 2ms before event end for upcoming event
     float nextMacroGateParam = 1.0f;
@@ -169,6 +185,7 @@ private:
     float nextNanoGateParam = 1.0f;
     float nextNanoShapeParam = 0.5f;
     float nextNanoSmoothParam = 0.0f;
+    float nextNanoOctaveParam = 0.0f;
 
     // Held random offsets for nano parameters (calculated once per event, added to per-cycle values)
     float heldNanoGateRandomOffset = 0.0f;
@@ -211,11 +228,18 @@ private:
     // Reverse playback control
     bool currentStutterIsReversed = false;      // Whether current stutter event should be reversed
     bool firstRepeatCyclePlayed = false;        // Track if first repeat cycle has been played
+    bool isFirstReverseCycle = false;           // Track first reverse cycle (skip crossfade during direction change)
     int cycleCompletionCounter = 0;             // Track how many cycles have been completed
 
     // Cycle detection for nanoGate holding
     int lastLoopPos = -1;                       // Track loop position to detect wrap-around
     int heldNanoEnvelopeLengthInSamples = 0;    // Pre-calculated nano envelope length per cycle
+
+    // EMA Filter State (exponential moving average for nano smooth)
+    std::vector<float> nanoEmaState;            // Per-channel EMA history for wet signal
+    std::vector<float> dryEmaStateForFade;      // Per-channel EMA history for dry signal during fades
+    float currentNanoEmaAlpha = 1.0f;           // Current alpha coefficient (1.0 = bypass, 0.05 = max smooth)
+    bool shouldResetEmaState = false;           // Flag to reset EMA at loop wraparound
 
     // Ratio/denominator lookup
     static constexpr std::array<double, 12> regularDenominators {{ 1.0, 4.0/3.0, 2.0, 3.0, 4.0, 6.0, 16.0/3.0, 8.0, 12.0, 16.0, 24.0, 32.0 }};

@@ -102,6 +102,13 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
     fadeLengthInSamples = static_cast<int>(sampleRate * FADE_DURATION_SECONDS);
 
+    // Initialize EMA state for nano smooth filter
+    nanoEmaState.resize(getTotalNumOutputChannels(), 0.0f);
+    dryEmaStateForFade.resize(getTotalNumOutputChannels(), 0.0f);
+    currentNanoEmaAlpha = 1.0f; // Start with bypass (no smoothing)
+    shouldResetEmaState = false;
+    isFirstReverseCycle = false;
+
     // Initialize output visualization buffer (dynamically sized to 1/4 note at current BPM)
     resizeOutputBufferForBpm(120.0, sampleRate);
 
@@ -484,7 +491,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // DECISION: Rate selection from chosen system
                     if (useNano) {
                         double currentNanoTune = params.getRawParameterValue("nanoTune")->load();
-                        double nanoBase = ((SECONDS_PER_MINUTE / bpm) / 16.0) / currentNanoTune;
+                        double octaveMultiplier = std::pow(2.0, currentNanoOctaveParam);
+                        double nanoBase = ((SECONDS_PER_MINUTE / bpm) / 16.0) / currentNanoTune / octaveMultiplier;
                         double sliceDuration = nanoBase / params.getRawParameterValue("nanoRatio_" + std::to_string(selectedIndex))->load();
                         chosenDenominator = WHOLE_NOTE_SECONDS_MULTIPLIER / (bpm * sliceDuration);
 
@@ -529,6 +537,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     currentNanoGateParam = nextNanoGateParam;
                     currentNanoShapeParam = nextNanoShapeParam;
                     currentNanoSmoothParam = nextNanoSmoothParam;
+                    currentNanoOctaveParam = nextNanoOctaveParam;
 
                     // Note: heldNanoGateRandomOffset and heldNanoShapeRandomOffset were already set at Decision Point 2
                     // These offsets will be added to per-cycle base values throughout the event
@@ -539,6 +548,19 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     float nanoGateMultiplier = NANO_GATE_MIN + currentNanoGateParam * NANO_GATE_RANGE;
                     int loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate + 1), 1, maxStutterLenSamples);
                     heldNanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
+
+                    // Transfer EMA state from crossfade to wet processing for seamless continuation
+                    // Scale by first sample's envelope gain to prevent jumps when shape curve starts near zero
+                    if (currentNanoSmoothParam > 0.0f) {  // Only if EMA filtering is active
+                        // Calculate what the first sample's nano envelope gain will be (progress = 0.0)
+                        float firstSampleNanoGain = calculateEnvelopeGain(0.0f, currentNanoShapeParam);
+
+                        for (int ch = 0; ch < totalNumOutputChannels; ++ch) {
+                            // Scale transferred state by first sample gain to respect envelope curve
+                            nanoEmaState[ch] = dryEmaStateForFade[ch] * firstSampleNanoGain;
+                        }
+                    }
+                    // Note: shouldResetEmaState remains false, allowing smooth continuation
 
                 }
                 else autoStutterActive = false;
@@ -668,6 +690,27 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                         nanoShapeRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoShapeRandom;
                 }
 
+                // Calculate NanoOctave random offset (integer steps only)
+                float nanoOctaveRandom = std::round(params.getRawParameterValue("NanoOctaveRandom")->load());
+                bool nanoOctaveBipolar = params.getRawParameterValue("NanoOctaveRandomBipolar")->load() > 0.5f;
+                float nanoOctaveRandomOffset;
+                if (nanoOctaveBipolar)
+                {
+                    // Bipolar: ±random (symmetric around center)
+                    // Generate random integer offset
+                    int maxOffset = static_cast<int>(std::abs(nanoOctaveRandom));
+                    nanoOctaveRandomOffset = static_cast<float>(juce::Random::getSystemRandom().nextInt(maxOffset * 2 + 1) - maxOffset);
+                }
+                else
+                {
+                    // Unipolar: + or - random (based on sign)
+                    int maxOffset = static_cast<int>(std::abs(nanoOctaveRandom));
+                    if (nanoOctaveRandom > 0.0f)
+                        nanoOctaveRandomOffset = static_cast<float>(juce::Random::getSystemRandom().nextInt(maxOffset + 1));
+                    else
+                        nanoOctaveRandomOffset = static_cast<float>(-juce::Random::getSystemRandom().nextInt(maxOffset + 1));
+                }
+
                 // Apply offsets to base values for next event parameters (used in fade calculations)
                 float nanoGateBase = params.getRawParameterValue("NanoGate")->load();
                 float nanoShapeBase = params.getRawParameterValue("NanoShape")->load();
@@ -675,6 +718,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 nextNanoGateParam = juce::jlimit(0.0f, 1.0f, nanoGateBase + nanoGateRandomOffset);
                 nextNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + nanoShapeRandomOffset);
                 nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
+
+                // Apply octave random offset (round base and clamp result)
+                float nanoOctaveBase = std::round(params.getRawParameterValue("NanoOctave")->load());
+                nextNanoOctaveParam = std::round(juce::jlimit(-1.0f, 3.0f, nanoOctaveBase + nanoOctaveRandomOffset));
 
                 // Store the random offsets for use throughout the event (will be copied to held offsets at event start)
                 heldNanoGateRandomOffset = nanoGateRandomOffset;
@@ -824,20 +871,25 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
         // DRY FADE LOGIC: 1ms before new beat (based on quantCount and stutter scheduling)
         bool dryFading = false;
+        bool isFadingStutterToStutter = false;  // Flag for EMA filtering during Stutter→Stutter fade
+        bool isFadingDryToStutter = false;      // Flag for gradual EMA during Dry→Stutter fade
+        float dryFadeProgress = 0.0f;           // Fade progress for EMA ramping
+
         if (samplesToNextBeat <= fadeLengthInSamples && samplesToNextBeat >= 0 && (quantCount+1) == quantToNewBeat) {
             dryFading = true;
             // Ensure proper boundary handling: when samplesToNextBeat=0, progress=1.0; when samplesToNextBeat=fadeLengthInSamples, progress=0.0
-            float dryFadeProgress = juce::jlimit(0.0f, 1.0f, 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples);
+            dryFadeProgress = juce::jlimit(0.0f, 1.0f, 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples);
 
             if (!stutterIsScheduled && autoStutterActive) {
-                // Stutter→Dry: dry fades from 0 to 1
+                // Stutter→Dry: dry fades from 0 to 1 (no EMA needed)
                 float startGain = 0.0f;
                 float endGain = 1.0f;
                 currentDryGain = startGain + (endGain - startGain) * dryFadeProgress;
 
 
             } else if (stutterIsScheduled && autoStutterActive) {
-                // Stutter→Stutter: dry fades from 0 to firstSampleGain
+                // Stutter→Stutter: dry fades from 0 to firstSampleGain (apply full EMA to dry)
+                isFadingStutterToStutter = true;
                 // Use NEXT parameters because we're calculating what we're fading TO
                 int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * nextMacroGateParam));
                 float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
@@ -864,7 +916,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
 
             } else if (stutterIsScheduled && !autoStutterActive) {
-                // Dry→Stutter: dry fades from 1 to firstSampleGain
+                // Dry→Stutter: dry fades from 1 to firstSampleGain (gradually introduce EMA)
+                isFadingDryToStutter = true;
                 // Use NEXT parameters because we're calculating what we're fading TO
                 int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * nextMacroGateParam));
                 float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
@@ -913,10 +966,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         int loopLen = 0;
         int readIndex = 0;
         int loopPos = 0;
-        int startOfLoopReadIndex = 0;
-        bool shouldApplyNanoSmooth = false;
-        int nanoFadeLen = 0;
-        float nanoFadeProgress = 0.0f;
 
         // Pre-calculate all smoothed parameters ONCE per sample (before channel loop)
         // Real-time parameters (always advance smoothly)
@@ -947,6 +996,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Resample base values and add the event-held random offsets
                 // Random offsets are calculated once per event and added to each cycle's base values
 
+                // Increment cycle counter and clear first reverse cycle flag after cycle 2
+                if (currentStutterIsReversed && firstRepeatCyclePlayed) {
+                    cycleCompletionCounter++;
+                    if (cycleCompletionCounter >= 2) {
+                        isFirstReverseCycle = false;
+                    }
+                }
+
                 // NanoGate: Resample base value and add held random offset
                 float nanoGateBase = smoothedNanoGate.getCurrentValue();
                 currentNanoGateParam = juce::jlimit(0.0f, 1.0f, nanoGateBase + heldNanoGateRandomOffset);
@@ -958,6 +1015,18 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                 // NanoSmooth: Resample (no randomization)
                 currentNanoSmoothParam = smoothedNanoSmooth.getCurrentValue();
+
+                // Calculate EMA alpha coefficient from nano smooth parameter
+                // 0.0 = bypass (alpha=1.0), 1.0 = max smooth (alpha=0.05)
+                currentNanoEmaAlpha = 1.0f - (currentNanoSmoothParam * NANO_EMA_ALPHA_RANGE);
+
+                // Set flag to reset EMA state at next sample (loop wraparound)
+                // Skip reset if cycle crossfade is active (EMA continues smoothly through crossfade)
+                float cycleCrossfade = parameters.getRawParameterValue("CycleCrossfade")->load();
+                if (cycleCrossfade < 0.01f) {
+                    shouldResetEmaState = true;
+                }
+                // With crossfade enabled, EMA state persists through transition
 
                 // Pre-calculate nano envelope length for this cycle (using randomized nanoGate value)
                 float nanoGateMultiplier = NANO_GATE_MIN + currentNanoGateParam * NANO_GATE_RANGE;
@@ -975,27 +1044,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             } else {
                 // Normal forward playback (including first cycle of reversed events)
                 readIndex = (stutterWritePos + loopPos) % maxStutterLenSamples;
-
-            }
-
-            nanoFadeLen = static_cast<int>((float)loopLen * currentNanoSmoothParam * NANO_SMOOTH_SCALE);
-            shouldApplyNanoSmooth = (nanoFadeLen > 1 && loopPos >= loopLen - nanoFadeLen && currentNanoSmoothParam > 0.0f);
-
-            // Skip nano smooth at end of first forward cycle when reverse is enabled
-            // ONLY if nanoGate is at maximum (1.0) - when there's no fade-out
-            // When nanoGate < 1.0, we need the crossfade to avoid clicks from the 0→start transition
-            if (currentStutterIsReversed && !firstRepeatCyclePlayed && smoothHeldNanoGate >= 1.0f) {
-                shouldApplyNanoSmooth = false;
-            }
-            if (shouldApplyNanoSmooth) {
-                if (currentStutterIsReversed && firstRepeatCyclePlayed) {
-                    // For reverse playback, the start of loop is at the end of the forward direction
-                    startOfLoopReadIndex = (stutterWritePos + loopLen - 1) % maxStutterLenSamples;
-                } else {
-                    // Normal forward direction
-                    startOfLoopReadIndex = (stutterWritePos + stutterPlayCounter - loopPos) % maxStutterLenSamples;
-                }
-                nanoFadeProgress = (float)(loopPos - (loopLen - nanoFadeLen)) / (float)nanoFadeLen;
             }
         }
 
@@ -1010,33 +1058,54 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                 // NANO ENVELOPE (controls internal loop behavior)
                 // Use currentNanoShapeParam (base + random offset) for envelope shape
-                // For reversed playback (after first cycle), reverse the envelope too for seamless transition
+                // For reversed playback (after first cycle), mirror both gate position and envelope
                 float nanoProgress;
+                float nanoGain = 0.0f;
+
                 if (currentStutterIsReversed && firstRepeatCyclePlayed) {
-                    // Reversed playback: envelope runs backwards (1.0 → 0.0 as loopPos increases 0 → loopLen-1)
-                    nanoProgress = 1.0f - ((float)loopPos / (float)heldNanoEnvelopeLengthInSamples);
-                } else {
-                    // Forward playback: envelope runs forward (0.0 → 1.0)
-                    nanoProgress = (float)loopPos / (float)heldNanoEnvelopeLengthInSamples;
-                }
-                // Use currentNanoShapeParam which includes randomization (base + held random offset)
-                float nanoGain = calculateEnvelopeGain(nanoProgress, currentNanoShapeParam);
+                    // REVERSE CYCLES: Mirror gate - silence first, then audio at end
+                    int gateStartPos = loopLen - heldNanoEnvelopeLengthInSamples;  // Audio starts here
 
-                if (loopPos < heldNanoEnvelopeLengthInSamples) {
-                    // Check if we're in fade-out region (constant 0.1ms fade)
-                    // Only apply fade-out when nanoGate is not at maximum (1.0)
-                    if (smoothHeldNanoGate < 1.0f) {
-                        int fadeOutLen = static_cast<int>(sampleRate * NANO_FADE_OUT_SECONDS);
-                        int fadeOutStart = std::max(0, heldNanoEnvelopeLengthInSamples - fadeOutLen);
+                    if (loopPos >= gateStartPos) {
+                        // We're in the gated (audible) region
+                        int positionInGatedRegion = loopPos - gateStartPos;
 
-                        if (loopPos >= fadeOutStart && fadeOutLen > 0) {
-                            // We're in the fade-out region
-                            float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(loopPos - fadeOutStart) / (float)fadeOutLen);
-                            nanoGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                        // Envelope runs backwards (1.0 → 0.0) through the gated region
+                        nanoProgress = 1.0f - ((float)positionInGatedRegion / (float)heldNanoEnvelopeLengthInSamples);
+                        nanoGain = calculateEnvelopeGain(nanoProgress, currentNanoShapeParam);
+
+                        // Fade-out at END of loop (last 0.1ms before wraparound)
+                        if (smoothHeldNanoGate < 1.0f) {
+                            int fadeOutLen = static_cast<int>(sampleRate * NANO_FADE_OUT_SECONDS);
+                            int fadeOutStart = std::max(gateStartPos, loopLen - fadeOutLen);
+
+                            if (loopPos >= fadeOutStart && fadeOutLen > 0) {
+                                float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(loopPos - fadeOutStart) / (float)fadeOutLen);
+                                nanoGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                            }
                         }
                     }
+                    // else: nanoGain stays 0.0 (silent before gateStartPos)
+
                 } else {
-                    nanoGain = 0.0f; // Silent after effective gate
+                    // FORWARD CYCLES: Original behavior - audio first, then silence
+                    if (loopPos < heldNanoEnvelopeLengthInSamples) {
+                        // Envelope runs forward (0.0 → 1.0)
+                        nanoProgress = (float)loopPos / (float)heldNanoEnvelopeLengthInSamples;
+                        nanoGain = calculateEnvelopeGain(nanoProgress, currentNanoShapeParam);
+
+                        // Fade-out at END of gated region (last 0.1ms before silence)
+                        if (smoothHeldNanoGate < 1.0f) {
+                            int fadeOutLen = static_cast<int>(sampleRate * NANO_FADE_OUT_SECONDS);
+                            int fadeOutStart = std::max(0, heldNanoEnvelopeLengthInSamples - fadeOutLen);
+
+                            if (loopPos >= fadeOutStart && fadeOutLen > 0) {
+                                float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(loopPos - fadeOutStart) / (float)fadeOutLen);
+                                nanoGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                            }
+                        }
+                    }
+                    // else: nanoGain stays 0.0 (silent after heldNanoEnvelopeLengthInSamples)
                 }
 
                 // MACRO ENVELOPE (controls overall event shape)
@@ -1074,31 +1143,111 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                 
 
-                // Generate base wet sample
-                wetSample = stutterBuffer.getSample(ch, readIndex) * macroGain * nanoGain;
+                // Generate wet sample with EMA filtering at configurable position
+                float processedSample = stutterBuffer.getSample(ch, readIndex);
 
+                // Apply cycle boundary crossfade to smooth loop transitions
+                float cycleCrossfade = parameters.getRawParameterValue("CycleCrossfade")->load();
+                if (cycleCrossfade > 0.0f && autoStutterActive) {
+                    int crossfadeLen = static_cast<int>(cycleCrossfade * loopLen * CYCLE_CROSSFADE_MAX_PERCENT);
+                    crossfadeLen = std::clamp(crossfadeLen, 0, loopLen / 2);  // Max 50% of loop
 
-                // Apply nano smooth (crossfade between loop repetitions) - using currentNanoShapeParam with randomization
-                if (shouldApplyNanoSmooth)
-                {
-                    // Calculate nano gain for loop start position
-                    // For reversed playback: loop starts at envelope END (progress = 1.0)
-                    // For forward playback: loop starts at envelope START (progress = 0.0)
-                    float loopStartNanoProgress = currentStutterIsReversed ? 1.0f : 0.0f;
-                    float loopStartNanoGain = calculateEnvelopeGain(loopStartNanoProgress, currentNanoShapeParam);
+                    if (crossfadeLen > 0) {
+                        // Handle forward playback (only for truly forward events, not first cycle of reverse)
+                        if (!currentStutterIsReversed) {
+                            if (loopPos >= (loopLen - crossfadeLen)) {
+                                // In crossfade region (end of loop)
+                                int tailOffset = loopPos - (loopLen - crossfadeLen);
+                                float fadeOutGain = 1.0f - ((float)tailOffset / (float)crossfadeLen);
 
-                    float incomingSample = stutterBuffer.getSample(ch, startOfLoopReadIndex) * macroGain * loopStartNanoGain;
-                    
-                    if (currentStutterIsReversed && !firstRepeatCyclePlayed) {
-                        incomingSample = drySample * macroGain * loopStartNanoGain;
+                                // Read head sample (beginning of loop)
+                                int headPos = tailOffset;
+                                int headReadIndex = (stutterWritePos + headPos) % maxStutterLenSamples;
+                                float headSample = stutterBuffer.getSample(ch, headReadIndex);
+
+                                // Crossfade: fade out tail, fade in head
+                                float fadeInGain = 1.0f - fadeOutGain;
+                                processedSample = processedSample * fadeOutGain + headSample * fadeInGain;
+                            }
+                        }
+                        // Handle reverse playback (skip during first reverse cycle)
+                        else if (!isFirstReverseCycle) {
+                            if (loopPos < crossfadeLen) {
+                                // In crossfade region (beginning of loopPos in reverse)
+                                float fadeInGain = (float)loopPos / (float)crossfadeLen;
+
+                                // Read tail sample (end of loop in reverse)
+                                int tailPos = loopLen - crossfadeLen + loopPos;
+                                int reversedTailPos = loopLen - 1 - tailPos;
+                                int tailReadIndex = (stutterWritePos + reversedTailPos) % maxStutterLenSamples;
+                                float tailSample = stutterBuffer.getSample(ch, tailReadIndex);
+
+                                // Crossfade: fade in current, fade out tail
+                                float fadeOutGain = 1.0f - fadeInGain;
+                                processedSample = processedSample * fadeInGain + tailSample * fadeOutGain;
+                            }
+                        }
                     }
-                    
-                    wetSample = wetSample * (1.0f - nanoFadeProgress) + incomingSample * nanoFadeProgress;
                 }
+
+                // Position A: Apply EMA before nano envelope (if selected)
+                if constexpr (NANO_EMA_POSITION == EmaPosition::BeforeNanoEnvelope) {
+                    if (shouldResetEmaState) {
+                        nanoEmaState[ch] = processedSample;
+                    }
+                    processedSample = currentNanoEmaAlpha * processedSample + (1.0f - currentNanoEmaAlpha) * nanoEmaState[ch];
+                    nanoEmaState[ch] = processedSample;
+                }
+
+                processedSample *= nanoGain;  // Apply nano envelope
+
+                // Position B: Apply EMA after nano envelope, before macro envelope (if selected)
+                if constexpr (NANO_EMA_POSITION == EmaPosition::AfterNanoEnvelope) {
+                    if (shouldResetEmaState) {
+                        nanoEmaState[ch] = processedSample;
+                    }
+                    processedSample = currentNanoEmaAlpha * processedSample + (1.0f - currentNanoEmaAlpha) * nanoEmaState[ch];
+                    nanoEmaState[ch] = processedSample;
+                }
+
+                processedSample *= macroGain; // Apply macro envelope
+
+                // Position C: Apply EMA after macro envelope (if selected)
+                if constexpr (NANO_EMA_POSITION == EmaPosition::AfterMacroEnvelope) {
+                    if (shouldResetEmaState) {
+                        nanoEmaState[ch] = processedSample;
+                    }
+                    processedSample = currentNanoEmaAlpha * processedSample + (1.0f - currentNanoEmaAlpha) * nanoEmaState[ch];
+                    nanoEmaState[ch] = processedSample;
+                }
+
+                wetSample = processedSample;
             }
 
             // APPLY FADE GAINS from Decision Point 3
-            float fadedDrySample = drySample * currentDryGain;
+            // Apply conditional EMA filtering to dry signal during crossfades to eliminate clicks
+            float fadedDrySample;
+
+            if (isFadingStutterToStutter && currentNanoSmoothParam > 0.0f) {
+                // Stutter→Stutter: Apply full EMA to dry using current alpha
+                float filteredDry = currentNanoEmaAlpha * drySample
+                    + (1.0f - currentNanoEmaAlpha) * dryEmaStateForFade[ch];
+                dryEmaStateForFade[ch] = filteredDry;
+                fadedDrySample = filteredDry * currentDryGain;
+
+            } else if (isFadingDryToStutter && currentNanoSmoothParam > 0.0f) {
+                // Dry→Stutter: Gradually introduce EMA (alpha ramps from 1.0 → currentNanoEmaAlpha)
+                float rampedAlpha = 1.0f - ((1.0f - currentNanoEmaAlpha) * dryFadeProgress);
+                float filteredDry = rampedAlpha * drySample
+                    + (1.0f - rampedAlpha) * dryEmaStateForFade[ch];
+                dryEmaStateForFade[ch] = filteredDry;
+                fadedDrySample = filteredDry * currentDryGain;
+
+            } else {
+                // Default: No EMA filtering (Stutter→Dry or no fade active)
+                fadedDrySample = drySample * currentDryGain;
+            }
+
             float fadedWetSample = wetSample;
 
 
@@ -1167,9 +1316,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         if (autoStutterActive) {
             ++stutterPlayCounter;
 
+            // Clear EMA reset flag after it's been used for all channels in this sample
+            shouldResetEmaState = false;
+
             // Track when we complete the first repeat cycle for reverse playback
             if (currentStutterIsReversed && !firstRepeatCyclePlayed && stutterPlayCounter >= loopLen) {
                 firstRepeatCyclePlayed = true;
+                // Reset EMA state when switching from forward to reverse playback
+                shouldResetEmaState = true;
+                // Mark that we're entering first reverse cycle (skip crossfade during direction change)
+                isFirstReverseCycle = true;
+                cycleCompletionCounter = 0;  // Start counting completed cycles (0 = entering cycle 1)
             }
 
             if (stutterPlayCounter >= loopLen) {
@@ -1390,10 +1547,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGate", 1), "Nano Gate", 0.0f, 1.0f, 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShape", 1), "Nano Shape", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoSmooth", 1), "Nano Smooth", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("CycleCrossfade", 1), "Cycle Crossfade", 0.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGateRandom", 1), "Nano Gate Random", -1.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShapeRandom", 1), "Nano Shape Random", -1.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("NanoGateRandomBipolar", 1), "Nano Gate Random Bipolar", false));
     params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("NanoShapeRandomBipolar", 1), "Nano Shape Random Bipolar", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("NanoOctave", 1), "Nano Octave",
+        juce::NormalisableRange<float>(-1.0f, 3.0f, 1.0f),  // min, max, step (1.0 = integer snapping)
+        0.0f));  // default
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("NanoOctaveRandom", 1), "Nano Octave Random",
+        juce::NormalisableRange<float>(-4.0f, 4.0f, 1.0f),  // min, max, step (1.0 = integer snapping)
+        0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("NanoOctaveRandomBipolar", 1), "Nano Octave Random Bipolar", false));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroGate", 1), "Macro Gate", 0.25f, 1.0f, 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroShape", 1), "Macro Shape", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroSmooth", 1), "Macro Smooth", 0.0f, 1.0f, 0.0f));

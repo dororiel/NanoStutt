@@ -197,13 +197,16 @@ public:
 
     DualSlider nanoGateDualSlider;
     DualSlider nanoShapeDualSlider;
+    DualSlider nanoOctaveDualSlider;
     juce::Slider nanoSmoothSlider;
+    juce::Slider nanoCycleCrossfadeSlider;
     DualSlider macroGateDualSlider, macroShapeDualSlider;
     juce::Slider macroSmoothSlider;
     juce::Slider timingOffsetSlider;
 
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateAttachment, nanoShapeAttachment, nanoSmoothAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateAttachment, nanoShapeAttachment, nanoSmoothAttachment, nanoCycleCrossfadeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateRandomAttachment, nanoShapeRandomAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoOctaveAttachment, nanoOctaveRandomAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateAttachment, macroShapeAttachment, macroSmoothAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateRandomAttachment, macroShapeRandomAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> timingOffsetAttachment;
@@ -211,6 +214,7 @@ public:
     // Listeners for bipolar state synchronization
     std::unique_ptr<juce::ParameterAttachment> nanoGateBipolarAttachment;
     std::unique_ptr<juce::ParameterAttachment> nanoShapeBipolarAttachment;
+    std::unique_ptr<juce::ParameterAttachment> nanoOctaveBipolarAttachment;
     std::unique_ptr<juce::ParameterAttachment> macroGateBipolarAttachment;
     std::unique_ptr<juce::ParameterAttachment> macroShapeBipolarAttachment;
 
@@ -236,7 +240,7 @@ public:
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> quantActiveAttachments;
 
     juce::Label chanceLabel, reverseLabel, quantLabel;
-    juce::Label nanoGateLabel, nanoShapeLabel, nanoSmoothLabel;
+    juce::Label nanoGateLabel, nanoShapeLabel, nanoOctaveLabel, nanoSmoothLabel, nanoCycleCrossfadeLabel;
     juce::Label macroGateLabel, macroShapeLabel, macroSmoothLabel;
     juce::Label nanoControlsLabel, macroControlsLabel;
 

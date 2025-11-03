@@ -80,6 +80,27 @@ public:
         mainSlider.setDoubleClickReturnValue(true, mainDefault);
     }
 
+    // Set visual range scale for parameters with ranges beyond -1 to 1
+    // For example, if parameter range is -4 to 4, call setVisualRangeScale(4.0f)
+    void setVisualRangeScale(float scale)
+    {
+        visualRangeScale = scale;
+
+        // Update randomSlider range to match the visual scale
+        // This allows the full range to be used (e.g., -4 to 4 instead of -1 to 1)
+        randomSlider.setRange(-scale, scale, randomSlider.getInterval());
+
+        repaint();
+    }
+
+    // Set drag sensitivity for the random slider
+    // Higher values = more sensitive (changes faster with less drag)
+    // Default is 0.003, try 0.01-0.02 for integer parameters
+    void setRandomSensitivity(float sensitivity)
+    {
+        randomSensitivity = sensitivity;
+    }
+
     void paint(juce::Graphics& g) override
     {
         auto bounds = getLocalBounds().toFloat();
@@ -91,7 +112,8 @@ public:
         float randomRingRadius = outerRadius * 0.85f;
 
         // Always draw outer ring guide (even at 0 value) for visual feedback
-        float randomAmount = static_cast<float>(randomSlider.getValue());
+        // Normalize randomAmount by visualRangeScale to handle parameters with ranges beyond -1 to 1
+        float randomAmount = static_cast<float>(randomSlider.getValue()) / visualRangeScale;
 
         float startAngle = juce::MathConstants<float>::pi * 1.2f;
         float endAngle = juce::MathConstants<float>::pi * 2.8f;
@@ -314,6 +336,8 @@ private:
     float mainDragStartY = 0.0f;
     double mainDefaultValue = 0.5;  // Default value for main parameter
     double randomDefaultValue = 0.0;  // Default value for random parameter
+    float visualRangeScale = 1.0f;  // Scale factor for visual display (default 1.0 for backward compatibility)
+    float randomSensitivity = 0.003f;  // Drag sensitivity for random slider (default 0.003, higher = more sensitive)
 
     void updateRandomFromMouse(const juce::MouseEvent& event)
     {
@@ -323,19 +347,29 @@ private:
         // Vertical drag changes random amount
         // Drag up (negative distance) = increase
         // Drag down (positive distance) = decrease
-        float sensitivity = 0.003f;
         double newValue;
+
+        // Use dynamic range from randomSlider instead of hardcoded limits
+        double minValue = randomSlider.getMinimum();
+        double maxValue = randomSlider.getMaximum();
 
         if (isBipolar)
         {
-            // Bipolar mode: only positive values (0 to 1), drag up increases magnitude
-            newValue = juce::jlimit(0.0, 1.0, std::abs(dragStartValue) - dragDistance * sensitivity);
+            // Bipolar mode: only positive values (minValue to maxValue), drag up increases magnitude
+            newValue = juce::jlimit(minValue, maxValue, std::abs(dragStartValue) - dragDistance * randomSensitivity);
         }
         else
         {
-            // Unipolar mode: allow negative values (-1 to 1)
+            // Unipolar mode: allow negative values (minValue to maxValue)
             // Drag up = positive (add), drag down = negative (subtract)
-            newValue = juce::jlimit(-1.0, 1.0, dragStartValue - dragDistance * sensitivity);
+            newValue = juce::jlimit(minValue, maxValue, dragStartValue - dragDistance * randomSensitivity);
+        }
+
+        // Round to nearest interval if interval is set (for integer snapping)
+        double interval = randomSlider.getInterval();
+        if (interval > 0.0)
+        {
+            newValue = std::round(newValue / interval) * interval;
         }
 
         randomSlider.setValue(newValue, juce::sendNotificationAsync);
@@ -353,6 +387,13 @@ private:
         float sensitivity = range * 0.005f;  // 0.5% of range per pixel
         double newValue = juce::jlimit(mainSlider.getMinimum(), mainSlider.getMaximum(),
                                       mainDragStartValue - dragDistance * sensitivity);
+
+        // Round to nearest interval if interval is set (for integer snapping)
+        double interval = mainSlider.getInterval();
+        if (interval > 0.0)
+        {
+            newValue = std::round(newValue / interval) * interval;
+        }
 
         mainSlider.setValue(newValue, juce::sendNotificationAsync);
         repaint();

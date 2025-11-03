@@ -115,8 +115,57 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
             param->setValueNotifyingHost(isBipolar ? 1.0f : 0.0f);
     };
 
+    // Setup DualSlider for NanoOctave with randomization and integer snapping
+    addAndMakeVisible(nanoOctaveDualSlider);
+    nanoOctaveDualSlider.setDefaultValues(0.0, 0.0);  // NanoOctave default: 0, Random default: 0
+
+    // Set integer snapping for both main and random sliders
+    nanoOctaveDualSlider.getMainSlider().setRange(-1.0, 3.0, 1.0);  // Step of 1.0 for integers
+    nanoOctaveDualSlider.getRandomSlider().setRange(-4.0, 4.0, 1.0);  // Step of 1.0 for integers (up to 4 octaves random)
+
+    // Set visual range scale to match parameter range (-4 to 4 for full octave range)
+    nanoOctaveDualSlider.setVisualRangeScale(4.0f);
+
+    // Increase sensitivity for faster octave changes (default 0.003, using 0.012 for 4x sensitivity)
+    nanoOctaveDualSlider.setRandomSensitivity(0.012f);
+
+    // Set integer text display formatters BEFORE attachments (correct JUCE pattern for discrete parameters)
+    nanoOctaveDualSlider.getMainSlider().textFromValueFunction = [](double value) {
+        return juce::String(static_cast<int>(std::round(value)));
+    };
+    nanoOctaveDualSlider.getRandomSlider().textFromValueFunction = [](double value) {
+        return juce::String(static_cast<int>(std::round(value)));
+    };
+
+    // Create attachments AFTER text formatters (will respect formatters for discrete parameters)
+    nanoOctaveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "NanoOctave", nanoOctaveDualSlider.getMainSlider());
+    nanoOctaveRandomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "NanoOctaveRandom", nanoOctaveDualSlider.getRandomSlider());
+
+    // Setup bipolar state synchronization for NanoOctave
+    nanoOctaveBipolarAttachment = std::make_unique<juce::ParameterAttachment>(
+        *audioProcessor.getParameters().getParameter("NanoOctaveRandomBipolar"),
+        [this](float newValue) {
+            nanoOctaveDualSlider.setBipolarMode(newValue > 0.5f);
+        });
+
+    // Set initial state
+    nanoOctaveDualSlider.setBipolarMode(
+        audioProcessor.getParameters().getRawParameterValue("NanoOctaveRandomBipolar")->load() > 0.5f);
+
+    // Listen for changes from UI (right-click toggle)
+    nanoOctaveDualSlider.onBipolarModeChange = [this](bool isBipolar) {
+        auto* param = audioProcessor.getParameters().getParameter("NanoOctaveRandomBipolar");
+        if (param)
+            param->setValueNotifyingHost(isBipolar ? 1.0f : 0.0f);
+    };
+
     // NanoSmooth remains a regular slider (no randomization)
     setupKnob(nanoSmoothSlider, "NanoSmooth", nanoSmoothAttachment);
+
+    // CycleCrossfade (regular slider for cycle boundary smoothing)
+    setupKnob(nanoCycleCrossfadeSlider, "CycleCrossfade", nanoCycleCrossfadeAttachment);
 
     // Setup DualSliders for MacroGate and MacroShape with randomization
     addAndMakeVisible(macroGateDualSlider);
@@ -189,7 +238,9 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
 
     setupLabel(nanoGateLabel, "Gate", nanoGateDualSlider);
     setupLabel(nanoShapeLabel, "Shape", nanoShapeDualSlider);
+    setupLabel(nanoOctaveLabel, "Oct", nanoOctaveDualSlider);
     setupLabel(nanoSmoothLabel, "Smooth", nanoSmoothSlider);
+    setupLabel(nanoCycleCrossfadeLabel, "Xfade", nanoCycleCrossfadeSlider);
     setupLabel(macroGateLabel, "Gate", macroGateDualSlider);
     setupLabel(macroShapeLabel, "Shape", macroShapeDualSlider);
     setupLabel(macroSmoothLabel, "Smooth", macroSmoothSlider);
@@ -653,7 +704,7 @@ void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> 
     Grid envelopeGrid;
     envelopeGrid.templateRows = {
         Track(Px(18)), Track(Px(60)), Track(Px(60)), Track(Px(2)), // Macro section with less spacing
-        Track(Px(18)), Track(Px(60)), Track(Px(60))  // Nano section
+        Track(Px(18)), Track(Px(60)), Track(Px(60))  // Nano section (back to 2 rows)
     };
     envelopeGrid.templateColumns = { Track(Fr(1)), Track(Fr(1)) }; // 2 equal columns
     envelopeGrid.columnGap = Px(8);
@@ -668,7 +719,8 @@ void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> 
         GridItem(nanoControlsLabel).withArea(5, 1, 5, 3),
         GridItem(nanoGateDualSlider).withArea(6, 1),
         GridItem(nanoShapeDualSlider).withArea(6, 2),
-        GridItem(nanoSmoothSlider).withArea(7, 1, 7, 3)
+        GridItem(nanoSmoothSlider).withArea(7, 1),
+        GridItem(nanoCycleCrossfadeSlider).withArea(7, 2)
     };
     envelopeGrid.performLayout(bounds);
 }
@@ -1234,11 +1286,17 @@ void NanoStuttAudioProcessorEditor::resized()
 
     // Align buttons with their respective slider sections (vertically centered within slider area)
     int rhythmicButtonY = rhythmicBounds.getY() + (rhythmicBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2;
-    int nanoButtonY = nanoBounds.getY() + (nanoBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2;
+    int nanoButtonY = nanoBounds.getY() + (nanoBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2 + 40;  // +40px to make room for octave control
     int quantButtonY = quantBounds.getY() + (quantBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2;
 
     resetRateProbButton.setBounds(buttonX, rhythmicButtonY, buttonWidth, buttonHeight);
     randomizeRateProbButton.setBounds(buttonX, rhythmicButtonY + buttonHeight + buttonSpacing, buttonWidth, buttonHeight);
+
+    // Position octave control above reset button for nano section
+    const int octaveControlSize = 60;  // Size for DualSlider
+    const int octaveY = nanoButtonY - octaveControlSize - 12;  // 12px spacing above buttons
+    nanoOctaveDualSlider.setBounds(buttonX - (octaveControlSize - buttonWidth) / 2, octaveY, octaveControlSize, octaveControlSize);
+    nanoOctaveLabel.setBounds(buttonX - (octaveControlSize - buttonWidth) / 2, octaveY + octaveControlSize, octaveControlSize, 15);
 
     resetNanoProbButton.setBounds(buttonX, nanoButtonY, buttonWidth, buttonHeight);
     randomizeNanoProbButton.setBounds(buttonX, nanoButtonY + buttonHeight + buttonSpacing, buttonWidth, buttonHeight);
