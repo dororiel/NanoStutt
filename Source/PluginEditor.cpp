@@ -1198,18 +1198,33 @@ void NanoStuttAudioProcessorEditor::resized()
 
     int currentY = 0;
 
-    // === Repeat Rates Section ===
-    auto repeatRatesLabelBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(sectionLabelHeight);
-    repeatRatesLabel.setBounds(repeatRatesLabelBounds);
+    // === Quantization Section ===
+    auto quantizationLabelBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(sectionLabelHeight);
+    quantizationLabel.setBounds(quantizationLabelBounds);
 
-    // === Advanced View Toggle (right-aligned on same line as Repeat Rates label) ===
+    // === Advanced View Toggle (right-aligned on same line as Quantization label) ===
     auto advancedToggleBounds = juce::Rectangle<int>(
-        repeatRatesLabelBounds.getRight() - 120,
-        repeatRatesLabelBounds.getY(),
+        quantizationLabelBounds.getRight() - 120,
+        quantizationLabelBounds.getY(),
         120,
         18  // Slightly shorter to fit with label
     );
     advancedViewToggle.setBounds(advancedToggleBounds);
+
+    currentY += sectionLabelHeight + sectionLabelGap;
+
+    // Quant height depends on view mode (includes rowGap spacing: 4px between rows)
+    int quantTotalHeight = showAdvancedView ? (20 + uniformSliderHeight + 12 + 8) : (uniformSliderHeight + 12 + 4);
+    auto quantBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(quantTotalHeight);
+
+    // Add conditional border padding for quantization section (not shown in visible area, but for consistency)
+    // Note: Quantization section border is not currently drawn in paint(), but keeping pattern consistent
+
+    currentY += quantTotalHeight + sectionGap;
+
+    // === Repeat Rates Section ===
+    auto repeatRatesLabelBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(sectionLabelHeight);
+    repeatRatesLabel.setBounds(repeatRatesLabelBounds);
 
     currentY += sectionLabelHeight + sectionLabelGap;
 
@@ -1259,21 +1274,9 @@ void NanoStuttAudioProcessorEditor::resized()
     }
     currentY += nanoTotalHeight + sectionGap;
 
-    // === Quantization Section ===
-    auto quantizationLabelBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(sectionLabelHeight);
-    quantizationLabel.setBounds(quantizationLabelBounds);
-    currentY += sectionLabelHeight + sectionLabelGap;
-
-    // Quant height depends on view mode (includes rowGap spacing: 4px between rows)
-    int quantTotalHeight = showAdvancedView ? (20 + uniformSliderHeight + 12 + 8) : (uniformSliderHeight + 12 + 4);
-    auto quantBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(quantTotalHeight);
-
-    // Add conditional border padding for quantization section (not shown in visible area, but for consistency)
-    // Note: Quantization section border is not currently drawn in paint(), but keeping pattern consistent
-
+    layoutQuantizationControls(quantBounds);
     layoutRateSliders(rhythmicBounds);
     layoutNanoControls(nanoBounds);
-    layoutQuantizationControls(quantBounds);
 
     // Position tuner in left panel
     tuner.setBounds(tunerBounds);
@@ -1285,9 +1288,12 @@ void NanoStuttAudioProcessorEditor::resized()
     const int buttonX = buttonColumnBounds.getX() + (buttonColumnBounds.getWidth() - buttonWidth) / 2;
 
     // Align buttons with their respective slider sections (vertically centered within slider area)
+    int quantButtonY = quantBounds.getY() + (quantBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2;
     int rhythmicButtonY = rhythmicBounds.getY() + (rhythmicBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2;
     int nanoButtonY = nanoBounds.getY() + (nanoBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2 + 40;  // +40px to make room for octave control
-    int quantButtonY = quantBounds.getY() + (quantBounds.getHeight() - (2 * buttonHeight + buttonSpacing)) / 2;
+
+    resetQuantProbButton.setBounds(buttonX, quantButtonY, buttonWidth, buttonHeight);
+    randomizeQuantProbButton.setBounds(buttonX, quantButtonY + buttonHeight + buttonSpacing, buttonWidth, buttonHeight);
 
     resetRateProbButton.setBounds(buttonX, rhythmicButtonY, buttonWidth, buttonHeight);
     randomizeRateProbButton.setBounds(buttonX, rhythmicButtonY + buttonHeight + buttonSpacing, buttonWidth, buttonHeight);
@@ -1300,9 +1306,6 @@ void NanoStuttAudioProcessorEditor::resized()
 
     resetNanoProbButton.setBounds(buttonX, nanoButtonY, buttonWidth, buttonHeight);
     randomizeNanoProbButton.setBounds(buttonX, nanoButtonY + buttonHeight + buttonSpacing, buttonWidth, buttonHeight);
-
-    resetQuantProbButton.setBounds(buttonX, quantButtonY, buttonWidth, buttonHeight);
-    randomizeQuantProbButton.setBounds(buttonX, quantButtonY + buttonHeight + buttonSpacing, buttonWidth, buttonHeight);
 
     layoutRightPanel(rightBounds);
     layoutVisualizer(visualizerBounds);
