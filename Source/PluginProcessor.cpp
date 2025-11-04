@@ -996,9 +996,11 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Resample base values and add the event-held random offsets
                 // Random offsets are calculated once per event and added to each cycle's base values
 
-                // Increment cycle counter and clear first reverse cycle flag after cycle 2
+                // Increment cycle counter for all stutters (used for crossfade skip-first-cycle logic)
+                cycleCompletionCounter++;
+
+                // Clear first reverse cycle flag after cycle 2
                 if (currentStutterIsReversed && firstRepeatCyclePlayed) {
-                    cycleCompletionCounter++;
                     if (cycleCompletionCounter >= 2) {
                         isFirstReverseCycle = false;
                     }
@@ -1147,7 +1149,9 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float processedSample = stutterBuffer.getSample(ch, readIndex);
 
                 // Apply cycle boundary crossfade to smooth loop transitions
+                // ENVELOPE-AWARE: Calculate envelope gains for both samples before mixing
                 float cycleCrossfade = parameters.getRawParameterValue("CycleCrossfade")->load();
+                bool crossfadeWasApplied = false;  // Track if we applied envelope-aware crossfade
                 if (cycleCrossfade > 0.0f && autoStutterActive) {
                     int crossfadeLen = static_cast<int>(cycleCrossfade * loopLen * CYCLE_CROSSFADE_MAX_PERCENT);
                     crossfadeLen = std::clamp(crossfadeLen, 0, loopLen / 2);  // Max 50% of loop
@@ -1155,19 +1159,51 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     if (crossfadeLen > 0) {
                         // Handle forward playback (only for truly forward events, not first cycle of reverse)
                         if (!currentStutterIsReversed) {
+                            // Crossfade at END of cycle - fades to audio BEFORE stutter buffer capture
+                            // Works on all cycles including first (pre-stutter audio always exists)
                             if (loopPos >= (loopLen - crossfadeLen)) {
                                 // In crossfade region (end of loop)
                                 int tailOffset = loopPos - (loopLen - crossfadeLen);
                                 float fadeOutGain = 1.0f - ((float)tailOffset / (float)crossfadeLen);
+                                float fadeInGain = 1.0f - fadeOutGain;
 
-                                // Read head sample (beginning of loop)
-                                int headPos = tailOffset;
-                                int headReadIndex = (stutterWritePos + headPos) % maxStutterLenSamples;
+                                // Read head sample from BEFORE stutter buffer (leads to start of repeat)
+                                // This mirrors reverse reading tailPos = loopPos (forward samples)
+                                int headPos = -crossfadeLen + tailOffset;  // Negative = before stutterWritePos
+                                int headReadIndex = (stutterWritePos + headPos + maxStutterLenSamples) % maxStutterLenSamples;
                                 float headSample = stutterBuffer.getSample(ch, headReadIndex);
 
-                                // Crossfade: fade out tail, fade in head
-                                float fadeInGain = 1.0f - fadeOutGain;
-                                processedSample = processedSample * fadeOutGain + headSample * fadeInGain;
+                                // Calculate envelope gains for both positions
+                                // Tail envelope (current position near end of loop)
+                                float tailEnvelopeGain = 0.0f;
+                                if (loopPos < heldNanoEnvelopeLengthInSamples) {
+                                    float tailProgress = (float)loopPos / (float)heldNanoEnvelopeLengthInSamples;
+                                    tailEnvelopeGain = calculateEnvelopeGain(tailProgress, currentNanoShapeParam);
+
+                                    // Apply nano fade-out if gate < 1.0
+                                    if (smoothHeldNanoGate < 1.0f) {
+                                        int fadeOutLen = static_cast<int>(sampleRate * NANO_FADE_OUT_SECONDS);
+                                        int fadeOutStart = std::max(0, heldNanoEnvelopeLengthInSamples - fadeOutLen);
+                                        if (loopPos >= fadeOutStart && fadeOutLen > 0) {
+                                            float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(loopPos - fadeOutStart) / (float)fadeOutLen);
+                                            tailEnvelopeGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                                        }
+                                    }
+                                }
+
+                                // Head envelope (audio before stutter - use beginning envelope)
+                                // This audio "leads to" position 0, so calculate as if at beginning
+                                int headLoopPos = tailOffset;  // Maps to 0..crossfadeLen-1
+                                float headEnvelopeGain = 0.0f;
+                                if (headLoopPos < heldNanoEnvelopeLengthInSamples) {
+                                    float headProgress = (float)headLoopPos / (float)heldNanoEnvelopeLengthInSamples;
+                                    headEnvelopeGain = calculateEnvelopeGain(headProgress, currentNanoShapeParam);
+                                }
+
+                                // Apply envelope gains to raw samples, then crossfade
+                                processedSample = (processedSample * tailEnvelopeGain) * fadeOutGain +
+                                                 (headSample * headEnvelopeGain) * fadeInGain;
+                                crossfadeWasApplied = true;
                             }
                         }
                         // Handle reverse playback (skip during first reverse cycle)
@@ -1175,16 +1211,58 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                             if (loopPos < crossfadeLen) {
                                 // In crossfade region (beginning of loopPos in reverse)
                                 float fadeInGain = (float)loopPos / (float)crossfadeLen;
+                                float fadeOutGain = 1.0f - fadeInGain;
 
-                                // Read tail sample (end of loop in reverse)
-                                int tailPos = loopLen - crossfadeLen + loopPos;
-                                int reversedTailPos = loopLen - 1 - tailPos;
-                                int tailReadIndex = (stutterWritePos + reversedTailPos) % maxStutterLenSamples;
+                                // Read tail sample (end of previous cycle in reverse playback)
+                                // Tail should come from near start of buffer (where previous cycle ended)
+                                int tailPos = loopPos;  // Position in previous cycle's ending
+                                int tailReadIndex = (stutterWritePos + tailPos) % maxStutterLenSamples;
                                 float tailSample = stutterBuffer.getSample(ch, tailReadIndex);
 
-                                // Crossfade: fade in current, fade out tail
-                                float fadeOutGain = 1.0f - fadeInGain;
-                                processedSample = processedSample * fadeInGain + tailSample * fadeOutGain;
+                                // Calculate envelope gains for both positions
+                                // Head envelope (current position at start of new cycle)
+                                int gateStartPos = loopLen - heldNanoEnvelopeLengthInSamples;
+                                float headEnvelopeGain = 0.0f;
+                                if (loopPos >= gateStartPos) {
+                                    int positionInGatedRegion = loopPos - gateStartPos;
+                                    float headProgress = 1.0f - ((float)positionInGatedRegion / (float)heldNanoEnvelopeLengthInSamples);
+                                    headEnvelopeGain = calculateEnvelopeGain(headProgress, currentNanoShapeParam);
+
+                                    // Apply nano fade-out if gate < 1.0 (at end of loop in reverse)
+                                    if (smoothHeldNanoGate < 1.0f) {
+                                        int fadeOutLen = static_cast<int>(sampleRate * NANO_FADE_OUT_SECONDS);
+                                        int fadeOutStart = std::max(gateStartPos, loopLen - fadeOutLen);
+                                        if (loopPos >= fadeOutStart && fadeOutLen > 0) {
+                                            float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(loopPos - fadeOutStart) / (float)fadeOutLen);
+                                            headEnvelopeGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                                        }
+                                    }
+                                }
+
+                                // Tail envelope (end of previous cycle in reverse)
+                                // Previous cycle ended with loopPos near loopLen, which had low envelope gain
+                                float tailEnvelopeGain = 0.0f;
+                                int tailLoopPos = loopLen - crossfadeLen + loopPos;
+                                if (tailLoopPos >= gateStartPos) {
+                                    int tailPosInGatedRegion = tailLoopPos - gateStartPos;
+                                    float tailProgress = 1.0f - ((float)tailPosInGatedRegion / (float)heldNanoEnvelopeLengthInSamples);
+                                    tailEnvelopeGain = calculateEnvelopeGain(tailProgress, currentNanoShapeParam);
+
+                                    // Apply nano fade-out if gate < 1.0
+                                    if (smoothHeldNanoGate < 1.0f) {
+                                        int fadeOutLen = static_cast<int>(sampleRate * NANO_FADE_OUT_SECONDS);
+                                        int fadeOutStart = std::max(gateStartPos, loopLen - fadeOutLen);
+                                        if (tailLoopPos >= fadeOutStart && fadeOutLen > 0) {
+                                            float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(tailLoopPos - fadeOutStart) / (float)fadeOutLen);
+                                            tailEnvelopeGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
+                                        }
+                                    }
+                                }
+
+                                // Apply envelope gains to raw samples, then crossfade
+                                processedSample = (processedSample * headEnvelopeGain) * fadeInGain +
+                                                 (tailSample * tailEnvelopeGain) * fadeOutGain;
+                                crossfadeWasApplied = true;
                             }
                         }
                     }
@@ -1199,7 +1277,11 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     nanoEmaState[ch] = processedSample;
                 }
 
-                processedSample *= nanoGain;  // Apply nano envelope
+                // Apply nano envelope (skip if already applied in crossfade)
+                if (!crossfadeWasApplied) {
+                    processedSample *= nanoGain;
+                }
+                // else: envelope gains already baked into crossfaded sample
 
                 // Position B: Apply EMA after nano envelope, before macro envelope (if selected)
                 if constexpr (NANO_EMA_POSITION == EmaPosition::AfterNanoEnvelope) {
