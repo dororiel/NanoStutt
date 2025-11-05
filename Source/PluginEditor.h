@@ -127,9 +127,26 @@ public:
             }
         }
 
-        // Calculate base frequency (at ratio = 1.0, current tune)
-        double currentNanoTune = processor.getParameters().getRawParameterValue("nanoTune")->load();
-        double nanoBase = ((60.0 / bpm) / 16.0) / currentNanoTune;
+        // Get nano base and tuning parameters with null checks
+        auto* nanoTuneParam = processor.getParameters().getRawParameterValue("nanoTune");
+        auto* nanoBaseParam = processor.getParameters().getRawParameterValue("nanoBase");
+        auto* nanoOctaveParam = processor.getParameters().getRawParameterValue("NanoOctave");
+
+        if (nanoTuneParam == nullptr || nanoBaseParam == nullptr || nanoOctaveParam == nullptr)
+        {
+            // Parameters not initialized yet - show placeholder
+            g.setColour(juce::Colours::grey);
+            g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
+            g.drawText("--", getLocalBounds(), juce::Justification::centred);
+            return;
+        }
+
+        double currentNanoTune = nanoTuneParam->load();
+        int nanoBaseValue = static_cast<int>(nanoBaseParam->load());
+        NanoTuning::NanoBase nanoBase = static_cast<NanoTuning::NanoBase>(nanoBaseValue);
+        float nanoOctave = nanoOctaveParam->load();
+        float octaveMultiplier = std::pow(2.0f, nanoOctave);
+
         float frequency;
         bool isActive = processor.isUsingNanoRate();
         float storedFrequency = processor.getNanoFrequency();
@@ -143,8 +160,20 @@ public:
         }
         else
         {
-            // Use base frequency (ratio = 1.0) - shown in grey
-            frequency = static_cast<float>(1.0 / nanoBase);
+            // Calculate base frequency based on nanoBase setting
+            if (nanoBase == NanoTuning::NanoBase::BPMSynced)
+            {
+                // BPM-synced: use beat-based calculation
+                double secondsPerCycle = ((60.0 / bpm) / 16.0) / currentNanoTune / octaveMultiplier;
+                frequency = static_cast<float>(1.0 / secondsPerCycle);
+            }
+            else
+            {
+                // Note-based: use musical note frequency
+                float noteFreq = NanoTuning::getNoteFrequency(nanoBase);
+                frequency = noteFreq * currentNanoTune * octaveMultiplier;
+            }
+
             g.setColour(juce::Colours::grey);
         }
 
@@ -184,7 +213,8 @@ private:
     NanoStuttAudioProcessor& processor;
 };
 
-class NanoStuttAudioProcessorEditor  : public juce::AudioProcessorEditor
+class NanoStuttAudioProcessorEditor  : public juce::AudioProcessorEditor,
+                                       private juce::Timer
 {
 public:
     NanoStuttAudioProcessorEditor (NanoStuttAudioProcessor&);
@@ -257,6 +287,9 @@ public:
     juce::OwnedArray<juce::Slider> nanoRateProbSliders;
     juce::OwnedArray<juce::TextEditor> nanoNumerators;
     juce::OwnedArray<juce::TextEditor> nanoDenominators;
+    juce::OwnedArray<juce::TextEditor> nanoSemitoneEditors;  // For Equal Temperament (0-11 semitones)
+    juce::OwnedArray<juce::Label> nanoDecimalLabels;  // For Quarter-comma Meantone (read-only)
+    juce::OwnedArray<juce::ComboBox> nanoVariantSelectors;  // For interval variants (e.g., Aug 4th vs Dim 5th)
     juce::OwnedArray<juce::Label> nanoIntervalLabels;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> nanoRatioAttachments;
 
@@ -264,13 +297,23 @@ public:
 
     juce::ToggleButton advancedViewToggle;
     bool showAdvancedView = false;
-   
+    int lastTuningSystemIndex = -1;  // Track tuning system changes for UI updates
+    int lastScaleIndex = -1;  // Track scale changes for layout updates
+
     juce::Label nanoBlendLabel;
     
     juce::Slider nanoTuneSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoTuneAttachment;
 
     juce::Label nanoTuneLabel;
+
+    // Nano tuning system UI components
+    juce::ComboBox nanoBaseMenu;
+    juce::ComboBox tuningSystemMenu;
+    juce::ComboBox scaleMenu;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> nanoBaseAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> tuningSystemAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> scaleAttachment;
 
     juce::ComboBox waveshaperAlgorithmMenu;
     juce::Slider waveshaperSlider;
@@ -281,8 +324,10 @@ public:
     juce::ToggleButton gainCompensationToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> gainCompensationAttachment;
 
-
-
+    // Preset UI components
+    juce::TextButton savePresetButton;
+    juce::ComboBox presetMenu;
+    juce::Label presetNameLabel;
 
     StutterVisualizer visualizer;
     NanoPitchTuner tuner;
@@ -291,6 +336,16 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void updateNanoRatioFromFraction(int index);
+    void updateNanoRatioFromSemitone(int index);
+    void updateNanoRatioFromVariant(int index);  // Updates ratio from variant selector choice
+    void updateNanoRatioUI();  // Updates all nano ratio displays based on current tuning system
+
+    // Preset management helper methods
+    void updatePresetMenu();
+    void updatePresetNameLabel();
+    void onPresetSelected();
+    void onSavePresetClicked();
+    void timerCallback() override;
 
 private:
     // Stored bounds for drawing colored borders

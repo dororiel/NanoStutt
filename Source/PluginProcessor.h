@@ -10,6 +10,8 @@
 
 #include <JuceHeader.h>
 #include <juce_dsp/juce_dsp.h>
+#include "TuningSystem.h"
+#include "PresetManager.h"
 
 //==============================================================================
 /**
@@ -74,6 +76,12 @@ public:
     float getNanoFrequency() const { return currentNanoFrequency.load(); }
     bool isAutoStutterActive() const { return autoStutterActive; }
 
+    // Preset management accessor
+    PresetManager& getPresetManager() { return presetManager; }
+
+    // Custom tuning detection control (for programmatic updates)
+    void setSuppressCustomDetection(bool suppress) { suppressCustomDetection = suppress; }
+
 private:
     // ==== Timing Constants ====
     static constexpr double FADE_DURATION_MS = 1.0;
@@ -119,6 +127,7 @@ private:
     // ==== Stutter variables ====
     juce::AudioBuffer<float> stutterBuffer;
     juce::AudioProcessorValueTreeState parameters;
+    PresetManager presetManager;
 
     // ==== Output visualization buffers ====
     juce::AudioBuffer<float> outputBuffer;              // Ring buffer for output visualization (sized to 1/4 note)
@@ -255,11 +264,24 @@ private:
         1.0f, 1.0f, 1.0f, 1.0f  // Fillers
     }};
 
+    // Nano tuning system state
+    NanoTuning::NanoBase currentNanoBase = NanoTuning::NanoBase::BPMSynced;
+    NanoTuning::TuningSystem currentTuningSystem = NanoTuning::TuningSystem::EqualTemperament;
+    NanoTuning::Scale currentScale = NanoTuning::Scale::Chromatic;
+    std::array<float, 12> runtimeNanoRatios = nanoRatios; // Runtime-modifiable copy
+    bool suppressCustomDetection = false;  // Suppress detection during programmatic updates
+
     // Param listeners
     void updateCachedParameters();
     void initializeParameterListeners();
     void parameterChanged(const juce::String& parameterID, float newValue) override;
     void updateWaveshaperFunction(int algorithm, float drive, bool gainCompensation);
+
+    // Nano tuning system methods
+    void updateNanoRatiosFromTuning();
+    void updateNanoVisibilityFromScale();
+    void detectCustomTuning();
+    void detectCustomScale();
 
     // Output buffer management
     void resizeOutputBufferForBpm(double bpm, double sampleRate);

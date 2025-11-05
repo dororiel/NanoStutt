@@ -413,6 +413,24 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     nanoTuneLabel.attachToComponent(&nanoTuneSlider, false);
     addAndMakeVisible(nanoTuneLabel);
 
+    // === Nano Tuning System Controls ===
+    addAndMakeVisible(nanoBaseMenu);
+    nanoBaseMenu.addItemList({ "BPM Synced", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }, 1);
+    nanoBaseAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getParameters(), "nanoBase", nanoBaseMenu);
+
+    addAndMakeVisible(tuningSystemMenu);
+    tuningSystemMenu.addItemList({ "Equal Temperament", "Just Intonation", "Pythagorean", "Quarter-comma Meantone", "Custom (Fraction)", "Custom (Decimal)", "Custom (Semitone)" }, 1);
+    tuningSystemAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getParameters(), "tuningSystem", tuningSystemMenu);
+
+    addAndMakeVisible(scaleMenu);
+    scaleMenu.addItemList({ "Chromatic", "Major", "Natural Minor", "Major Pentatonic", "Minor Pentatonic",
+                           "Dorian", "Phrygian", "Lydian", "Mixolydian", "Aeolian", "Locrian",
+                           "Harmonic Minor", "Melodic Minor", "Whole Tone", "Diminished", "Custom" }, 1);
+    scaleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getParameters(), "scale", scaleMenu);
+
     // === Waveshaper Controls ===
     addAndMakeVisible(waveshaperAlgorithmMenu);
     waveshaperAlgorithmMenu.addItem("None", 1);
@@ -440,6 +458,22 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     gainCompensationAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         audioProcessor.getParameters(), "GainCompensation", gainCompensationToggle);
 
+    // === Preset UI Components ===
+    addAndMakeVisible(savePresetButton);
+    savePresetButton.setButtonText("Save Preset");
+    savePresetButton.onClick = [this]() { onSavePresetClicked(); };
+
+    addAndMakeVisible(presetMenu);
+    presetMenu.onChange = [this]() { onPresetSelected(); };
+    updatePresetMenu(); // Populate preset menu
+
+    addAndMakeVisible(presetNameLabel);
+    presetNameLabel.setJustificationType(juce::Justification::centredLeft);
+    presetNameLabel.setText("No Preset Loaded", juce::dontSendNotification);
+
+    // Start timer for updating preset name label (30Hz)
+    startTimerHz(30);
+
     // === Advanced View Toggle ===
     addAndMakeVisible(advancedViewToggle);
     advancedViewToggle.setButtonText("Advanced View");
@@ -450,13 +484,18 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         const int currentWidth = getWidth();
         if (showAdvancedView) {
             // Entering advanced view: increase height for extra content
-            setSize(currentWidth, 650);  // From 450 to 680 (+230px)
+            setSize(currentWidth, 690);  // Increased to prevent nano preset cutoff
         } else {
             // Exiting advanced view: restore original height
-            setSize(currentWidth, 430);
+            setSize(currentWidth, 570);  // Increased for better spacing
         }
 
         resized();
+
+        // Update ratio UI to show correct editors in advanced view
+        if (showAdvancedView)
+            updateNanoRatioUI();
+
         repaint();  // Force repaint to update borders immediately
     };
 
@@ -490,6 +529,35 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         int gcd = std::gcd(num, denom);
         numBox->setText(juce::String(num / gcd), juce::dontSendNotification);
         denomBox->setText(juce::String(denom / gcd), juce::dontSendNotification);
+
+        // === Semitone editors for Equal Temperament ===
+        auto* semitoneBox = new juce::TextEditor();
+        semitoneBox->setInputRestrictions(2, "0123456789");
+        semitoneBox->setJustification(juce::Justification::centred);
+        semitoneBox->setText(juce::String(i), juce::dontSendNotification);
+        semitoneBox->onFocusLost = semitoneBox->onReturnKey = [this, i]() {
+            updateNanoRatioFromSemitone(i);
+        };
+        addAndMakeVisible(semitoneBox);
+        nanoSemitoneEditors.add(semitoneBox);
+        semitoneBox->setVisible(false);  // Hidden by default
+
+        // === Decimal labels for Quarter-comma Meantone (read-only) ===
+        auto* decimalLabel = new juce::Label();
+        decimalLabel->setJustificationType(juce::Justification::centred);
+        decimalLabel->setText(juce::String(ratioVal, 3), juce::dontSendNotification);
+        addAndMakeVisible(decimalLabel);
+        nanoDecimalLabels.add(decimalLabel);
+        decimalLabel->setVisible(false);  // Hidden by default
+
+        // === Variant selectors for interval options (e.g., Aug 4th vs Dim 5th) ===
+        auto* variantSelector = new juce::ComboBox();
+        variantSelector->onChange = [this, i]() {
+            updateNanoRatioFromVariant(i);
+        };
+        addAndMakeVisible(variantSelector);
+        nanoVariantSelectors.add(variantSelector);
+        variantSelector->setVisible(false);  // Hidden by default, shown when variants exist
     }
 
 
@@ -644,11 +712,12 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     addAndMakeVisible(visualizer);
     addAndMakeVisible(tuner);
 
-    setResizeLimits(800, 400, 1200, 600);
-    setSize(900, 430);
-    setResizable(true, true);
+    setResizeLimits(1000, 570, 1000, 690);
+    setSize(1000, 570);
+    setResizable(false, false);
 
-
+    // Initialize tuning system UI
+    updateNanoRatioUI();
 }
 
 
@@ -892,10 +961,10 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
         {
             // Advanced view: show all, grey out inactive
             nanoActiveButtons[i]->setVisible(true);
-            nanoNumerators[i]->setVisible(true);
-            nanoDenominators[i]->setVisible(true);
+            // Note: Ratio display component visibility (numerators, denominators, semitones, decimals, variants)
+            // is controlled by updateNanoRatioUI() based on tuning system
             nanoRateProbSliders[i]->setVisible(true);
-            nanoIntervalLabels[i]->setVisible(true);
+            nanoIntervalLabels[i]->setVisible(true);  // Bug fix: Always show labels in advanced view
 
             if (!activeStates[i])
             {
@@ -903,6 +972,8 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
                 nanoRateProbSliders[i]->setEnabled(false);
                 nanoNumerators[i]->setEnabled(false);
                 nanoDenominators[i]->setEnabled(false);
+                nanoSemitoneEditors[i]->setEnabled(false);
+                nanoVariantSelectors[i]->setEnabled(false);
             }
             else
             {
@@ -910,10 +981,21 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
                 nanoRateProbSliders[i]->setEnabled(true);
                 nanoNumerators[i]->setEnabled(true);
                 nanoDenominators[i]->setEnabled(true);
+                nanoSemitoneEditors[i]->setEnabled(true);
+                nanoVariantSelectors[i]->setEnabled(true);
             }
 
+            // Add all components to grid with proper row assignments
+            // Row 1: toggles
+            // Row 2: numerators OR semitones OR decimals OR variants (controlled by updateNanoRatioUI visibility)
+            // Row 3: denominators (controlled by updateNanoRatioUI visibility)
+            // Row 4: sliders
+            // Row 5: interval labels (always visible with sliders)
             nanoGrid.items.add(GridItem(*nanoActiveButtons[i]).withArea(1, columnIndex));
             nanoGrid.items.add(GridItem(*nanoNumerators[i]).withArea(2, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoSemitoneEditors[i]).withArea(2, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoDecimalLabels[i]).withArea(2, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoVariantSelectors[i]).withArea(2, columnIndex));
             nanoGrid.items.add(GridItem(*nanoDenominators[i]).withArea(3, columnIndex));
             nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(4, columnIndex));
             nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(5, columnIndex));
@@ -921,26 +1003,36 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
         }
         else if (activeStates[i])
         {
-            // Simple view: only active sliders (NO toggles)
+            // Simple view: only active sliders with labels (NO toggles, NO ratio editors)
             nanoActiveButtons[i]->setVisible(false);  // Hide toggles in simple view
+            // Ratio display components hidden in simple view
             nanoNumerators[i]->setVisible(false);
             nanoDenominators[i]->setVisible(false);
+            nanoSemitoneEditors[i]->setVisible(false);
+            nanoDecimalLabels[i]->setVisible(false);
+            nanoVariantSelectors[i]->setVisible(false);  // Hide variant selectors too
+
+            // Keep interval labels visible in simple view
+            nanoIntervalLabels[i]->setVisible(true);
+
             nanoRateProbSliders[i]->setVisible(true);
             nanoRateProbSliders[i]->setAlpha(1.0f);
             nanoRateProbSliders[i]->setEnabled(true);
-            nanoIntervalLabels[i]->setVisible(true);
 
-            // No toggle row in simple view - sliders start at row 1
+            // Simple view: row 1 = sliders, row 2 = labels
             nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(1, columnIndex));
             nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(2, columnIndex));
             columnIndex++;
         }
         else
         {
-            // Hide inactive sliders in simple view
+            // Hide inactive sliders in simple view (hide ALL components)
             nanoActiveButtons[i]->setVisible(false);
             nanoNumerators[i]->setVisible(false);
             nanoDenominators[i]->setVisible(false);
+            nanoSemitoneEditors[i]->setVisible(false);
+            nanoDecimalLabels[i]->setVisible(false);
+            nanoVariantSelectors[i]->setVisible(false);
             nanoRateProbSliders[i]->setVisible(false);
             nanoIntervalLabels[i]->setVisible(false);
         }
@@ -1130,6 +1222,13 @@ void NanoStuttAudioProcessorEditor::resized()
     autoStutterIndicator.setBounds(bounds.getWidth() - 158, 5, 28, 22);
     mixModeMenu.setBounds(bounds.getWidth() - 125, 5, 115, 22);
 
+    // === Top-center: Preset controls (centered horizontally) ===
+    const int presetControlsWidth = 200 + 5 + 90 + 5 + 200; // menu + gap + button + gap + label = 500
+    const int presetStartX = (bounds.getWidth() - presetControlsWidth) / 2;
+    presetMenu.setBounds(presetStartX, 5, 200, 22);
+    savePresetButton.setBounds(presetStartX + 205, 5, 90, 22);
+    presetNameLabel.setBounds(presetStartX + 300, 5, 200, 22);
+
     // Calculate main layout areas
     auto contentBounds = bounds.reduced(8).withTrimmedTop(15); // Leave space for top controls
 
@@ -1165,9 +1264,9 @@ void NanoStuttAudioProcessorEditor::resized()
 
     auto rightBounds = juce::Rectangle<int>(
         contentBounds.getRight() - rightWidth,
-        contentBounds.getY(),
+        contentBounds.getY() + 30,  // Push down 30px for better spacing from top
         rightWidth,
-        contentBounds.getHeight() - visualizerHeight - spacing
+        contentBounds.getHeight() - visualizerHeight - spacing - 30
     );
 
     auto visualizerBounds = juce::Rectangle<int>(
@@ -1196,7 +1295,7 @@ void NanoStuttAudioProcessorEditor::resized()
     const int uniformSliderHeight = 90;  // Uniform visual height for all sliders (increased from 75)
     const int sectionGap = 10;  // Gap between sections for better visual separation
 
-    int currentY = 0;
+    int currentY = 15;  // Add initial top spacing to separate from preset controls
 
     // === Quantization Section ===
     auto quantizationLabelBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(sectionLabelHeight);
@@ -1274,6 +1373,21 @@ void NanoStuttAudioProcessorEditor::resized()
     }
     currentY += nanoTotalHeight + sectionGap;
 
+    // === Nano Tuning System ComboBoxes (horizontal layout) ===
+    const int comboBoxHeight = 22;
+    const int comboBoxSpacing = 4;
+    const int nanoBaseWidth = 100; // Small fixed width for nanoBase
+    auto nanoTuningBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(comboBoxHeight);
+
+    const int remainingWidth = nanoTuningBounds.getWidth() - nanoBaseWidth - comboBoxSpacing * 2;
+    const int largeComboWidth = remainingWidth / 2;
+
+    nanoBaseMenu.setBounds(nanoTuningBounds.withWidth(nanoBaseWidth));
+    tuningSystemMenu.setBounds(nanoTuningBounds.withX(nanoTuningBounds.getX() + nanoBaseWidth + comboBoxSpacing).withWidth(largeComboWidth));
+    scaleMenu.setBounds(nanoTuningBounds.withX(nanoTuningBounds.getX() + nanoBaseWidth + comboBoxSpacing + largeComboWidth + comboBoxSpacing).withWidth(largeComboWidth));
+
+    currentY += comboBoxHeight + sectionGap;
+
     layoutQuantizationControls(quantBounds);
     layoutRateSliders(rhythmicBounds);
     layoutNanoControls(nanoBounds);
@@ -1316,7 +1430,7 @@ void NanoStuttAudioProcessorEditor::resized()
     stutterButton.setVisible(false);
 
     // Set minimum size for better layout
-    setResizeLimits(1000, 550, 1600, 900);
+   // setResizeLimits(1000, 570, 1000, 690);
 }
 
 void NanoStuttAudioProcessorEditor::updateNanoRatioFromFraction(int index)
@@ -1331,9 +1445,462 @@ void NanoStuttAudioProcessorEditor::updateNanoRatioFromFraction(int index)
     if (denom <= 0) denom = 1;
 
     double ratio = static_cast<double>(num) / denom;
-    ratio = juce::jlimit(0.1, 2.0, ratio);
+    ratio = juce::jlimit(0.1, 4.0, ratio);
 
     auto* param = audioProcessor.getParameters().getParameter("nanoRatio_" + juce::String(index));
     if (param != nullptr)
-        param->setValueNotifyingHost(static_cast<float>((ratio - 0.1) / (2.0 - 0.1)));
+        param->setValueNotifyingHost(static_cast<float>((ratio - 0.1) / (4.0 - 0.1)));
+}
+
+void NanoStuttAudioProcessorEditor::updateNanoRatioFromSemitone(int index)
+{
+    auto* semitoneBox = nanoSemitoneEditors[index];
+
+    // Check current tuning system to determine input mode
+    auto* tuningSystemParam = audioProcessor.getParameters().getRawParameterValue("tuningSystem");
+    if (tuningSystemParam == nullptr)
+        return;  // Parameters not initialized yet
+
+    int tuningIndex = static_cast<int>(tuningSystemParam->load());
+    NanoTuning::TuningSystem tuning = static_cast<NanoTuning::TuningSystem>(tuningIndex);
+
+    double ratio;
+
+    if (tuning == NanoTuning::TuningSystem::CustomDecimal)
+    {
+        // Custom Decimal mode: direct decimal input
+        ratio = semitoneBox->getText().getDoubleValue();
+        ratio = juce::jlimit(0.1, 4.0, ratio);
+    }
+    else
+    {
+        // Equal Temperament / Custom Semitone mode: semitone input (0-24 for 2 octaves)
+        int semitone = semitoneBox->getText().getIntValue();
+        semitone = juce::jlimit(0, 24, semitone);
+        semitoneBox->setText(juce::String(semitone), juce::dontSendNotification);
+
+        // Convert semitone to ratio using equal temperament formula: 2^(semitone/12)
+        ratio = std::pow(2.0, semitone / 12.0);
+        ratio = juce::jlimit(0.1, 4.0, ratio);
+    }
+
+    auto* param = audioProcessor.getParameters().getParameter("nanoRatio_" + juce::String(index));
+    if (param != nullptr)
+        param->setValueNotifyingHost(static_cast<float>((ratio - 0.1) / (4.0 - 0.1)));
+}
+
+void NanoStuttAudioProcessorEditor::updateNanoRatioFromVariant(int index)
+{
+    // Get current tuning system
+    auto* tuningSystemParam = audioProcessor.getParameters().getRawParameterValue("tuningSystem");
+    if (tuningSystemParam == nullptr)
+        return;
+
+    int tuningIndex = static_cast<int>(tuningSystemParam->load());
+    NanoTuning::TuningSystem tuning = static_cast<NanoTuning::TuningSystem>(tuningIndex);
+
+    // Get variants for this tuning system
+    auto variants = NanoTuning::getIntervalVariants(tuning);
+
+    // Get selected variant index
+    auto* variantSelector = nanoVariantSelectors[index];
+    int selectedIndex = variantSelector->getSelectedItemIndex();
+
+    // Bounds check
+    if (selectedIndex < 0 || selectedIndex >= static_cast<int>(variants[index].size()))
+        return;
+
+    // Get the ratio for the selected variant
+    float ratio = variants[index][selectedIndex].ratio;
+    ratio = juce::jlimit(0.1f, 4.0f, ratio);
+
+    // Suppress custom detection - variant selection is a valid choice within the current tuning system
+    audioProcessor.setSuppressCustomDetection(true);
+
+    // Update parameter
+    auto* param = audioProcessor.getParameters().getParameter("nanoRatio_" + juce::String(index));
+    if (param != nullptr)
+        param->setValueNotifyingHost(static_cast<float>((ratio - 0.1f) / (4.0f - 0.1f)));
+
+    // Re-enable custom detection
+    audioProcessor.setSuppressCustomDetection(false);
+}
+
+void NanoStuttAudioProcessorEditor::updateNanoRatioUI()
+{
+    // Get current tuning system with null check
+    auto* tuningSystemParam = audioProcessor.getParameters().getRawParameterValue("tuningSystem");
+    if (tuningSystemParam == nullptr)
+        return;  // Parameters not initialized yet
+
+    int tuningIndex = static_cast<int>(tuningSystemParam->load());
+    NanoTuning::TuningSystem tuning = static_cast<NanoTuning::TuningSystem>(tuningIndex);
+
+    // Get variants for current tuning system
+    auto variants = NanoTuning::getIntervalVariants(tuning);
+
+    // Hide all ratio editing UI components first (but NOT interval labels - those are controlled by layout)
+    for (int i = 0; i < 12; ++i)
+    {
+        nanoNumerators[i]->setVisible(false);
+        nanoDenominators[i]->setVisible(false);
+        nanoSemitoneEditors[i]->setVisible(false);
+        nanoDecimalLabels[i]->setVisible(false);
+        nanoVariantSelectors[i]->setVisible(false);
+        // Note: nanoIntervalLabels visibility is controlled by layoutNanoControls based on simple/advanced view
+    }
+
+    // Show appropriate UI based on tuning system (only in advanced view)
+    if (!showAdvancedView)
+    {
+        resized();  // Trigger layout refresh
+        return;  // Don't show any ratio editors in simple view
+    }
+
+    for (int i = 0; i < 12; ++i)
+    {
+        auto* ratioParam = audioProcessor.getParameters().getRawParameterValue("nanoRatio_" + juce::String(i));
+        if (ratioParam == nullptr)
+            continue;  // Skip if parameter not found
+
+        float ratioVal = ratioParam->load();
+
+        // Check if this position has multiple interval variants
+        bool hasVariants = !variants[i].empty();
+
+        if (hasVariants)
+        {
+            // Show variant dropdown selector
+            auto* selector = nanoVariantSelectors[i];
+            selector->clear();
+
+            // Populate dropdown with variant names
+            for (const auto& variant : variants[i])
+            {
+                selector->addItem(variant.displayName, selector->getNumItems() + 1);
+            }
+
+            // Select closest matching variant based on current ratio
+            int closestIndex = 0;
+            float minDiff = std::abs(ratioVal - variants[i][0].ratio);
+            for (size_t j = 1; j < variants[i].size(); ++j)
+            {
+                float diff = std::abs(ratioVal - variants[i][j].ratio);
+                if (diff < minDiff)
+                {
+                    minDiff = diff;
+                    closestIndex = static_cast<int>(j);
+                }
+            }
+            selector->setSelectedItemIndex(closestIndex, juce::dontSendNotification);
+            selector->setVisible(true);
+        }
+        else
+        {
+            // No variants - show appropriate ratio editor based on tuning system
+            switch (tuning)
+            {
+                case NanoTuning::TuningSystem::EqualTemperament:
+                case NanoTuning::TuningSystem::CustomSemitone:
+                {
+                    // Show semitone editors
+                    nanoSemitoneEditors[i]->setVisible(true);
+                    nanoSemitoneEditors[i]->setInputRestrictions(3, "0123456789");  // Integers only
+
+                    // Convert ratio back to semitone: semitone = 12 * log2(ratio)
+                    int semitone = static_cast<int>(std::round(12.0 * std::log2(ratioVal)));
+                    semitone = juce::jlimit(0, 24, semitone);
+                    nanoSemitoneEditors[i]->setText(juce::String(semitone), juce::dontSendNotification);
+                    break;
+                }
+
+                case NanoTuning::TuningSystem::QuarterCommaMeantone:
+                {
+                    // Show read-only decimal labels
+                    nanoDecimalLabels[i]->setVisible(true);
+                    nanoDecimalLabels[i]->setText(juce::String(ratioVal, 3), juce::dontSendNotification);
+                    break;
+                }
+
+                case NanoTuning::TuningSystem::JustIntonation:
+                case NanoTuning::TuningSystem::Pythagorean:
+                case NanoTuning::TuningSystem::CustomFraction:
+                {
+                    // Show fraction editors (numerator/denominator)
+                    nanoNumerators[i]->setVisible(true);
+                    nanoDenominators[i]->setVisible(true);
+
+                    // Convert ratio to fraction
+                    int num = static_cast<int>(std::round(ratioVal * 100));
+                    int denom = 100;
+                    int gcd = std::gcd(num, denom);
+                    nanoNumerators[i]->setText(juce::String(num / gcd), juce::dontSendNotification);
+                    nanoDenominators[i]->setText(juce::String(denom / gcd), juce::dontSendNotification);
+                    break;
+                }
+
+                case NanoTuning::TuningSystem::CustomDecimal:
+                {
+                    // Show editable decimal labels (use semitone editors but allow decimal input)
+                    nanoSemitoneEditors[i]->setVisible(true);
+                    nanoSemitoneEditors[i]->setInputRestrictions(0, "0123456789.");  // Allow decimals
+                    nanoSemitoneEditors[i]->setText(juce::String(ratioVal, 3), juce::dontSendNotification);
+                    break;
+                }
+
+                default:
+                    break;
+            }
+        }
+    }
+
+    // Trigger layout refresh
+    resized();
+}
+
+//==============================================================================
+// Preset Management Methods
+//==============================================================================
+
+void NanoStuttAudioProcessorEditor::updatePresetMenu()
+{
+    presetMenu.clear();
+
+    auto& presetManager = audioProcessor.getPresetManager();
+
+    // Add "No Preset" option
+    presetMenu.addItem("No Preset", 1);
+    presetMenu.addSeparator();
+
+    int itemId = 2;
+
+    // Add factory presets organized by category
+    auto factoryPresets = presetManager.getFactoryPresets();
+    if (!factoryPresets.isEmpty())
+    {
+        juce::PopupMenu factoryMenu;
+        juce::StringArray categories;
+
+        // Extract unique categories
+        for (const auto& preset : factoryPresets)
+        {
+            if (!categories.contains(preset.category))
+                categories.add(preset.category);
+        }
+
+        categories.sort(true);
+
+        // Build hierarchical menu
+        for (const auto& category : categories)
+        {
+            juce::PopupMenu categoryMenu;
+
+            for (const auto& preset : factoryPresets)
+            {
+                if (preset.category == category)
+                {
+                    categoryMenu.addItem(itemId++, preset.name);
+                }
+            }
+
+            factoryMenu.addSubMenu(category, categoryMenu);
+        }
+
+        presetMenu.getRootMenu()->addSubMenu("Factory Presets", factoryMenu);
+    }
+
+    // Add user presets
+    auto userPresets = presetManager.getUserPresets();
+    if (!userPresets.isEmpty())
+    {
+        presetMenu.addSeparator();
+        juce::PopupMenu userMenu;
+
+        for (const auto& preset : userPresets)
+        {
+            userMenu.addItem(itemId++, preset.name);
+        }
+
+        presetMenu.getRootMenu()->addSubMenu("User Presets", userMenu);
+    }
+}
+
+void NanoStuttAudioProcessorEditor::updatePresetNameLabel()
+{
+    auto& presetManager = audioProcessor.getPresetManager();
+
+    juce::String displayName = presetManager.getCurrentPresetName();
+
+    if (displayName.isEmpty())
+    {
+        presetNameLabel.setText("No Preset Loaded", juce::dontSendNotification);
+    }
+    else
+    {
+        // Add "*" if modified
+        if (presetManager.isModified())
+            displayName += " *";
+
+        presetNameLabel.setText(displayName, juce::dontSendNotification);
+    }
+}
+
+void NanoStuttAudioProcessorEditor::onPresetSelected()
+{
+    int selectedId = presetMenu.getSelectedId();
+
+    if (selectedId == 1) // "No Preset"
+    {
+        audioProcessor.getPresetManager().clearCurrentPreset();
+        updatePresetNameLabel();
+        return;
+    }
+
+    // Find the preset corresponding to the selected ID
+    auto& presetManager = audioProcessor.getPresetManager();
+    auto factoryPresets = presetManager.getFactoryPresets();
+    auto userPresets = presetManager.getUserPresets();
+
+    // Combine all presets
+    juce::Array<PresetInfo> allPresets;
+    allPresets.addArray(factoryPresets);
+    allPresets.addArray(userPresets);
+
+    // Calculate index (account for "No Preset" and separators)
+    int presetIndex = selectedId - 2;
+
+    if (presetIndex >= 0 && presetIndex < allPresets.size())
+    {
+        const auto& preset = allPresets[presetIndex];
+        bool success = presetManager.loadPreset(preset);
+
+        if (success)
+        {
+            updatePresetNameLabel();
+        }
+        else
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon,
+                "Load Error",
+                "Failed to load preset: " + preset.name,
+                "OK");
+        }
+    }
+}
+
+void NanoStuttAudioProcessorEditor::onSavePresetClicked()
+{
+    // Show dialog to get preset name
+    auto* window = new juce::AlertWindow("Save Preset",
+                                         "Enter a name for this preset:",
+                                         juce::AlertWindow::QuestionIcon);
+
+    window->addTextEditor("presetName", "", "Preset Name:");
+    window->addComboBox("category", { "Rhythmic", "Glitchy", "Ambient", "Experimental" }, "Category:");
+    window->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    window->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+
+    window->enterModalState(true, juce::ModalCallbackFunction::create([this, window](int result)
+    {
+        if (result == 1)
+        {
+            juce::String presetName = window->getTextEditorContents("presetName").trim();
+
+            if (presetName.isEmpty())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Invalid Name",
+                    "Please enter a valid preset name.",
+                    "OK");
+                return;
+            }
+
+            int categoryIndex = window->getComboBoxComponent("category")->getSelectedItemIndex();
+            juce::StringArray categories = { "Rhythmic", "Glitchy", "Ambient", "Experimental" };
+            juce::String category = categories[categoryIndex];
+
+            // Check if preset already exists
+            auto& presetManager = audioProcessor.getPresetManager();
+            auto userPresets = presetManager.getUserPresets();
+
+            bool presetExists = false;
+            for (const auto& preset : userPresets)
+            {
+                if (preset.name == presetName && preset.category == category)
+                {
+                    presetExists = true;
+                    break;
+                }
+            }
+
+            // Confirm overwrite if preset exists
+            if (presetExists)
+            {
+                bool overwrite = juce::NativeMessageBox::showOkCancelBox(
+                    juce::AlertWindow::WarningIcon,
+                    "Overwrite Preset?",
+                    "A preset with this name already exists. Do you want to overwrite it?",
+                    nullptr,
+                    nullptr);
+
+                if (!overwrite)
+                    return;
+            }
+
+            // Save the preset
+            bool success = presetManager.savePreset(presetName, category, "", "", presetExists);
+
+            if (success)
+            {
+                updatePresetMenu(); // Refresh menu
+                updatePresetNameLabel();
+
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "Success",
+                    "Preset saved successfully!",
+                    "OK");
+            }
+            else
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Save Error",
+                    "Failed to save preset. Please try again.",
+                    "OK");
+            }
+        }
+    }), true);
+}
+
+void NanoStuttAudioProcessorEditor::timerCallback()
+{
+    // Update preset name label to reflect modification state
+    updatePresetNameLabel();
+
+    // Check if tuning system has changed
+    auto* tuningSystemParam = audioProcessor.getParameters().getRawParameterValue("tuningSystem");
+    if (tuningSystemParam != nullptr)
+    {
+        int currentTuningIndex = static_cast<int>(tuningSystemParam->load());
+        if (currentTuningIndex != lastTuningSystemIndex)
+        {
+            lastTuningSystemIndex = currentTuningIndex;
+            updateNanoRatioUI();
+        }
+    }
+
+    // Check if scale has changed (affects visibility in simple view)
+    auto* scaleParam = audioProcessor.getParameters().getRawParameterValue("scale");
+    if (scaleParam != nullptr)
+    {
+        int currentScaleIndex = static_cast<int>(scaleParam->load());
+        if (currentScaleIndex != lastScaleIndex)
+        {
+            lastScaleIndex = currentScaleIndex;
+            resized();  // Trigger layout update for new visibility states
+        }
+    }
 }

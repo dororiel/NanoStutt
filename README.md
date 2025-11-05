@@ -45,7 +45,19 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 - **Nano Blend**: Mix between repeat mode and nano fractional rates (0.0-1.0)
 - **Nano Tune**: Global tuning adjustment for nano rates (0.75x - 2.0x)
 - **12 Nano Rate Slots**: Individual probability controls for micro-timing variations
-- **Fractional Ratios**: Precise timing ratios (1.0, 15/16, 5/6, 4/5, 3/4, 2/3, 3/5, 0.5, etc.)
+- **Advanced Tuning System**: Comprehensive tuning and scale system with multiple options
+  - **Nano Base**: BPM Synced or 12 chromatic note bases (C, C#, D, etc.)
+  - **Tuning Systems**: Equal Temperament, Just Intonation, Pythagorean, Quarter-comma Meantone
+  - **Custom Tuning Modes**: Custom (Fraction), Custom (Decimal), Custom (Semitone)
+  - **Musical Scales**: 16 preset scales (Chromatic, Major, Natural Minor, Pentatonic modes, Church modes, etc.)
+  - **Interval Variant Selection**: Choose between alternate interval options when available:
+    - Pythagorean: Aug 4th (1.424) vs Dim 5th (1.405) at position 6
+    - Just Intonation: Lesser/Greater Maj 2nd at position 2, Harmonic/Grave Min 7th at position 10
+  - **Extended Ratio Range**: Ratios support up to 4.0 (2 octaves) for wider pitch range
+- **Advanced View**: Toggleable advanced view showing:
+  - Active/inactive state toggles for all 12 positions
+  - Tuning-specific ratio editors (fractions, semitones, decimals, or variant selectors)
+  - Full control over tuning system parameters
 
 ### Envelope Controls
 
@@ -170,6 +182,17 @@ make -j4
 - Manual stutter buttons may need GUI integration
 
 ### Recent Improvements
+- **Implemented Comprehensive Nano Tuning System** - advanced musical tuning and scale framework
+  - Created TuningSystem.h with 4 historical tuning systems and 16 musical scales
+  - Implemented interval variant selection system for choosing between alternate mathematical ratios
+  - Added Custom Semitone mode for user-defined equal temperament tunings
+  - Extended ratio range from 2.0 to 4.0 (full 2-octave range)
+  - Updated tuning ratios to match historical/mathematical precision (from published tables)
+  - Implemented advanced view with tuning-specific editors (fractions, semitones, decimals, variants)
+  - Added automatic custom tuning detection when ratios are manually edited
+  - Suppressed detection during programmatic updates (variant selection, scale changes)
+  - Fixed layout issues: proper spacing in simple/advanced view, correct component visibility
+  - Fixed Unicode assertion error by replacing superscripts with ASCII caret notation (3^6:2^9)
 - **Implemented Nano Smooth EMA Filter** - replaced simple crossfade with exponential moving average low-pass filter
   - Configurable alpha coefficient: 0.0 = bypass (alpha=1.0), 1.0 = max smooth (alpha=0.05)
   - Per-channel EMA state tracking with smart reset at loop wraparound

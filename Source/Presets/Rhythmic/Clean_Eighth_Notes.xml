@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<NANOSTUTT_PRESET>
+  <METADATA name="Clean Eighth Notes" category="Rhythmic" author="NanoStutt"
+            creationDate="2025-11-05"
+            description="Classic 1/8 note stutter with minimal randomization"/>
+
+  <PARAM id="nanoBlend" value="0.0"/>
+  <PARAM id="autoStutterChance" value="0.8"/>
+  <PARAM id="reverseChance" value="0.0"/>
+  <PARAM id="MacroGate" value="1.0"/>
+  <PARAM id="MacroShape" value="0.5"/>
+  <PARAM id="MacroSmooth" value="0.0"/>
+  <PARAM id="NanoGate" value="1.0"/>
+  <PARAM id="NanoShape" value="0.5"/>
+  <PARAM id="NanoSmooth" value="0.0"/>
+  <PARAM id="nanoBase" value="0.0"/>
+  <PARAM id="tuningSystem" value="0.0"/>
+  <PARAM id="scale" value="0.0"/>
+</NANOSTUTT_PRESET>
