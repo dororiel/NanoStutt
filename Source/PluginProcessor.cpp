@@ -909,17 +909,27 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         bool isFadingDryToStutter = false;      // Flag for gradual EMA during Dry→Stutter fade
         float dryFadeProgress = 0.0f;           // Fade progress for EMA ramping
 
-        if (samplesToNextBeat <= fadeLengthInSamples && samplesToNextBeat >= 0 && (quantCount+1) == quantToNewBeat) {
+        // Gate mode: only fade when transitioning INTO a stutter (skip unnecessary fades)
+        bool shouldProcessFade = (samplesToNextBeat <= fadeLengthInSamples && samplesToNextBeat >= 0 && (quantCount+1) == quantToNewBeat);
+        bool shouldFadeInGateMode = (mixMode != 0) || stutterIsScheduled;
+
+        if (shouldProcessFade && shouldFadeInGateMode) {
             dryFading = true;
             // Ensure proper boundary handling: when samplesToNextBeat=0, progress=1.0; when samplesToNextBeat=fadeLengthInSamples, progress=0.0
             dryFadeProgress = juce::jlimit(0.0f, 1.0f, 1.0f - (float)samplesToNextBeat / (float)fadeLengthInSamples);
 
             if (!stutterIsScheduled && autoStutterActive) {
                 // Stutter→Dry: dry fades from 0 to 1 (no EMA needed)
-                float startGain = 0.0f;
-                float endGain = 1.0f;
-                currentDryGain = startGain + (endGain - startGain) * dryFadeProgress;
-
+                // Gate mode: no fade needed, immediately cut to silence
+                if (mixMode != 0) {
+                    // Insert/Mix modes: fade from stutter to dry audio
+                    float startGain = 0.0f;
+                    float endGain = 1.0f;
+                    currentDryGain = startGain + (endGain - startGain) * dryFadeProgress;
+                } else {
+                    // Gate mode: remain silent (macro envelope handles wet fadeout)
+                    currentDryGain = 0.0f;
+                }
 
             } else if (stutterIsScheduled && autoStutterActive) {
                 // Stutter→Stutter: dry fades from 0 to firstSampleGain (apply full EMA to dry)
@@ -950,7 +960,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
 
             } else if (stutterIsScheduled && !autoStutterActive) {
-                // Dry→Stutter: dry fades from 1 to firstSampleGain (gradually introduce EMA)
+                // Dry→Stutter: dry fades to firstSampleGain (gradually introduce EMA)
+                // Insert mode: fades from 1.0 (current audio), Gate mode: fades from 0.0 (silence)
                 isFadingDryToStutter = true;
                 // Use NEXT parameters because we're calculating what we're fading TO
                 int effectiveMacroLength = std::max(1, static_cast<int>((float)macroEnvelopeLengthInSamples * nextMacroGateParam));
@@ -972,7 +983,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Combine macro and nano gains for accurate first sample gain
                 float nextFirstSampleGain = nextFirstSampleMacroGain * nextFirstSampleNanoGain;
 
-                float startGain = 1.0f;
+                // Gate mode starts from silence (0.0), Insert mode starts from current audio (1.0)
+                float startGain = (mixMode == 0) ? 0.0f : 1.0f;
                 float endGain = nextFirstSampleGain;
                 currentDryGain = startGain + (endGain - startGain) * dryFadeProgress;
 
@@ -983,8 +995,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Active stuttering, no fade: dry silent
                 currentDryGain = 0.0f;
             } else if (!autoStutterActive) {
-                // No stutter: dry at full volume
-                currentDryGain = 1.0f;
+                // No stutter currently happening
+                if (!autoStutter) {
+                    // AutoStutter feature OFF: bypass mode, always pass dry through (all mix modes)
+                    currentDryGain = 1.0f;
+                } else {
+                    // AutoStutter feature ON but not stuttering: Gate mode = silence, others = dry
+                    currentDryGain = (mixMode == 0) ? 0.0f : 1.0f;
+                }
             }
             // else: keep whatever dry gain was set by fade logic
         }
@@ -1369,8 +1387,9 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
             // MIX MODES - determine final output
             float outputSample;
-            if (mixMode == 0) {         // GATE MODE: wet signal or silence only
-                outputSample = fadedWetSample;
+            if (mixMode == 0) {         // GATE MODE: stutter or silence, no dry signal
+                // Same as Insert Mode - fade preview uses dry signal ramping to firstSampleGain
+                outputSample = fadedDrySample + fadedWetSample;
             } else if (mixMode == 1) {  // INSERT MODE: stutter replaces dry signal
                 // In insert mode, fade gains control replacement:
                 // - During stutter: currentDryGain=0, currentWetGain=1 (wet replaces dry)
