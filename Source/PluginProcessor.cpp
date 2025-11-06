@@ -644,6 +644,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 }
                 nextMacroGateParam = juce::jlimit(0.25f, 1.0f, macroGateBase + gateRandomOffset);
 
+                // Snap to quarters if snap mode is enabled
+                if (params.getRawParameterValue("MacroGateSnapMode")->load() > 0.5f)
+                    nextMacroGateParam = std::round(nextMacroGateParam / 0.25f) * 0.25f;
+
                 // Sample MacroShape with randomization
                 float macroShapeBase = params.getRawParameterValue("MacroShape")->load();
                 float macroShapeRandom = params.getRawParameterValue("MacroShapeRandom")->load();
@@ -732,6 +736,11 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float nanoShapeBase = params.getRawParameterValue("NanoShape")->load();
 
                 nextNanoGateParam = juce::jlimit(0.0f, 1.0f, nanoGateBase + nanoGateRandomOffset);
+
+                // Snap to quarters if snap mode is enabled
+                if (params.getRawParameterValue("NanoGateSnapMode")->load() > 0.5f)
+                    nextNanoGateParam = std::round(nextNanoGateParam / 0.25f) * 0.25f;
+
                 nextNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + nanoShapeRandomOffset);
                 nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
 
@@ -793,6 +802,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 }
                 nextMacroGateParam = juce::jlimit(0.25f, 1.0f, macroGateBase + gateRandomOffset);
 
+                // Snap to quarters if snap mode is enabled
+                if (params.getRawParameterValue("MacroGateSnapMode")->load() > 0.5f)
+                    nextMacroGateParam = std::round(nextMacroGateParam / 0.25f) * 0.25f;
+
                 // Sample MacroShape with randomization
                 float macroShapeBase = params.getRawParameterValue("MacroShape")->load();
                 float macroShapeRandom = params.getRawParameterValue("MacroShapeRandom")->load();
@@ -851,6 +864,11 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float nanoShapeBase = params.getRawParameterValue("NanoShape")->load();
 
                 nextNanoGateParam = juce::jlimit(0.0f, 1.0f, nanoGateBase + nanoGateRandomOffset);
+
+                // Snap to quarters if snap mode is enabled
+                if (params.getRawParameterValue("NanoGateSnapMode")->load() > 0.5f)
+                    nextNanoGateParam = std::round(nextNanoGateParam / 0.25f) * 0.25f;
+
                 nextNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + nanoShapeRandomOffset);
                 nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
 
@@ -1679,6 +1697,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("MacroShapeRandom", 1), "Macro Shape Random", -1.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("MacroGateRandomBipolar", 1), "Macro Gate Random Bipolar", false));
     params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("MacroShapeRandomBipolar", 1), "Macro Shape Random Bipolar", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("NanoGateSnapMode", 1), "Nano Gate Snap Mode", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("MacroGateSnapMode", 1), "Macro Gate Snap Mode", false));
     params.push_back(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID("MixMode", 1), "Mix Mode",
         juce::StringArray{"Gate", "Insert", "Mix"}, 1));
 

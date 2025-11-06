@@ -62,14 +62,20 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 ### Envelope Controls
 
 #### Nano Envelope (Internal Loop Control)
-- **Nano Gate**: Loop duration control (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
+- **Nano Gate**: Loop duration control (0.25-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
+  - **Snap-to-Quarter Mode**: Right-click inner knob to toggle snap mode (cyan ring indicator)
+  - Snap mode quantizes gate values and randomization to quarter increments (0.25, 0.5, 0.75, 1.0)
+  - Snap state saved in presets for consistent behavior across sessions
 - **Nano Shape**: Loop envelope curve (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
 - **Nano Octave**: Octave offset control (-1 to +3, integer steps) with randomization (±4 octaves) for pitch shifting effects
 - **Nano Smooth**: EMA low-pass filter (0.0-1.0) - exponential moving average smoothing with alpha coefficient mapping (0.0 = bypass, 1.0 = maximum smoothing)
 - **Cycle Crossfade**: Smoothing at nano cycle boundaries (0.0-1.0) - enables continuous EMA state through loop wraparound
 
 #### Macro Envelope (Event-level Control)
-- **Macro Gate**: Overall event duration (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
+- **Macro Gate**: Overall event duration (0.25-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
+  - **Snap-to-Quarter Mode**: Right-click inner knob to toggle snap mode (cyan ring indicator)
+  - Snap mode quantizes gate values and randomization to quarter increments (0.25, 0.5, 0.75, 1.0)
+  - Snap state saved in presets for consistent behavior across sessions
 - **Macro Shape**: Event envelope curve (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
 - **Macro Smooth**: Event boundary smoothing (0.0-1.0)
 
@@ -171,7 +177,7 @@ make -j4
 - ✅ **Waveshaping system** - built-in audio processing with 6 algorithms and intensity control
 - ✅ **Modern Grid-based UI** - responsive layout with organized control sections
 - ✅ Pre-emptive fade system with click elimination
-- ✅ Dual envelope architecture (Nano + Macro)
+- ✅ Dual envelope architecture (Nano + Macro) with snap-to-quarter mode for gate controls
 - ✅ All three mix modes (Gate, Insert, Mix)
 - ✅ **DAW-synced output visualizer** - color-coded waveform display with perfect timeline alignment
 - ✅ Host synchronization and tempo tracking
@@ -182,6 +188,15 @@ make -j4
 - Manual stutter buttons may need GUI integration
 
 ### Recent Improvements
+- **Added Snap-to-Quarter Mode for Gate Controls** - precision gate value control with visual feedback
+  - Right-click inner knob on nano/macro gate to toggle snap mode
+  - Cyan ring indicator shows when snap mode is active
+  - Quantizes both main gate value and randomization amount to quarters (0.25, 0.5, 0.75, 1.0)
+  - Works with all randomization modes (bipolar/unipolar)
+  - Randomized values snap to quarters on processing side for consistent behavior
+  - Snap state automatically saved in presets
+  - Restricted to gate controls only (shape/octave controls remain smooth)
+  - Bidirectional parameter synchronization for proper preset loading
 - **Implemented Comprehensive Nano Tuning System** - advanced musical tuning and scale framework
   - Created TuningSystem.h with 4 historical tuning systems and 16 musical scales
   - Implemented interval variant selection system for choosing between alternate mathematical ratios

@@ -248,6 +248,10 @@ public:
     std::unique_ptr<juce::ParameterAttachment> macroGateBipolarAttachment;
     std::unique_ptr<juce::ParameterAttachment> macroShapeBipolarAttachment;
 
+    // Listeners for snap mode state synchronization
+    std::unique_ptr<juce::ParameterAttachment> nanoGateSnapModeAttachment;
+    std::unique_ptr<juce::ParameterAttachment> macroGateSnapModeAttachment;
+
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stutterAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> autoStutterChanceAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> reverseChanceAttachment;

@@ -89,6 +89,27 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
             param->setValueNotifyingHost(isBipolar ? 1.0f : 0.0f);
     };
 
+    // Enable snap mode for gate control only
+    nanoGateDualSlider.setSnapModeAvailable(true);
+
+    // Setup snap mode state synchronization (parameter → UI)
+    nanoGateSnapModeAttachment = std::make_unique<juce::ParameterAttachment>(
+        *audioProcessor.getParameters().getParameter("NanoGateSnapMode"),
+        [this](float newValue) {
+            nanoGateDualSlider.setSnapMode(newValue > 0.5f);
+        });
+
+    // Set initial snap mode state from parameter
+    nanoGateDualSlider.setSnapMode(
+        audioProcessor.getParameters().getRawParameterValue("NanoGateSnapMode")->load() > 0.5f);
+
+    // Listen for snap mode changes from UI (right-click inner knob)
+    nanoGateDualSlider.onSnapModeChange = [this](bool snapEnabled) {
+        auto* param = audioProcessor.getParameters().getParameter("NanoGateSnapMode");
+        if (param)
+            param->setValueNotifyingHost(snapEnabled ? 1.0f : 0.0f);
+    };
+
     // Setup DualSlider for NanoShape with randomization
     addAndMakeVisible(nanoShapeDualSlider);
     nanoShapeDualSlider.setDefaultValues(0.5, 0.0);  // NanoShape default: 0.5, Random default: 0.0
@@ -198,6 +219,27 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         auto* param = audioProcessor.getParameters().getParameter("MacroGateRandomBipolar");
         if (param)
             param->setValueNotifyingHost(isBipolar ? 1.0f : 0.0f);
+    };
+
+    // Enable snap mode for gate control only
+    macroGateDualSlider.setSnapModeAvailable(true);
+
+    // Setup snap mode state synchronization (parameter → UI)
+    macroGateSnapModeAttachment = std::make_unique<juce::ParameterAttachment>(
+        *audioProcessor.getParameters().getParameter("MacroGateSnapMode"),
+        [this](float newValue) {
+            macroGateDualSlider.setSnapMode(newValue > 0.5f);
+        });
+
+    // Set initial snap mode state from parameter
+    macroGateDualSlider.setSnapMode(
+        audioProcessor.getParameters().getRawParameterValue("MacroGateSnapMode")->load() > 0.5f);
+
+    // Listen for snap mode changes from UI (right-click inner knob)
+    macroGateDualSlider.onSnapModeChange = [this](bool snapEnabled) {
+        auto* param = audioProcessor.getParameters().getParameter("MacroGateSnapMode");
+        if (param)
+            param->setValueNotifyingHost(snapEnabled ? 1.0f : 0.0f);
     };
 
     // Setup bipolar state synchronization for MacroShape

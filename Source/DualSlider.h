@@ -72,6 +72,22 @@ public:
     // Callback when bipolar mode changes via right-click
     std::function<void(bool)> onBipolarModeChange;
 
+    // Callback when snap mode changes via right-click
+    std::function<void(bool)> onSnapModeChange;
+
+    // Enable or disable snap mode availability (default: disabled)
+    void setSnapModeAvailable(bool available)
+    {
+        snapModeAvailable = available;
+        if (!available && snapModeEnabled)
+        {
+            // If snap mode is currently enabled but we're disabling availability, turn it off
+            setSnapMode(false);
+        }
+    }
+
+    bool isSnapModeAvailable() const { return snapModeAvailable; }
+
     // Set default values for double-click reset
     void setDefaultValues(double mainDefault, double randomDefault = 0.0)
     {
@@ -216,6 +232,21 @@ public:
             float centerY = centreY + randomRingRadius * std::sin(centerAngle - juce::MathConstants<float>::halfPi);
             g.fillEllipse(centerX - endPointRadius, centerY - endPointRadius, endPointRadius * 2, endPointRadius * 2);
         }
+
+        // Visual feedback for snap-to-quarter mode
+        if (snapModeEnabled)
+        {
+            // Draw cyan colored ring around the outer edge to indicate snap mode is active
+            g.setColour(juce::Colours::cyan.withAlpha(0.6f));
+            juce::Path snapIndicatorRing;
+            float snapRingRadius = outerRadius * 1.05f;
+            snapIndicatorRing.addCentredArc(centreX, centreY,
+                                           snapRingRadius, snapRingRadius,
+                                           0.0f,
+                                           startAngle, endAngle,
+                                           true);
+            g.strokePath(snapIndicatorRing, juce::PathStrokeType(2.5f));
+        }
     }
 
     void resized() override
@@ -231,28 +262,7 @@ public:
 
     void mouseDown(const juce::MouseEvent& event) override
     {
-        // Right-click toggles bipolar/unipolar mode
-        if (event.mods.isRightButtonDown())
-        {
-            isBipolar = !isBipolar;
-
-            // When switching to bipolar mode, convert negative values to positive
-            if (isBipolar && randomSlider.getValue() < 0.0)
-            {
-                randomSlider.setValue(std::abs(randomSlider.getValue()), juce::sendNotificationAsync);
-            }
-
-            if (onBipolarModeChange)
-                onBipolarModeChange(isBipolar);
-            repaint();
-            return;
-        }
-
-        dragStartValue = randomSlider.getValue();
-        dragStartY = event.position.y;
-        mainDragStartY = event.position.y;
-        mainDragStartValue = mainSlider.getValue();
-
+        // Calculate hit detection first - determine if clicking outer ring or inner knob
         auto pos = event.getPosition().toFloat();
         auto centre = getLocalBounds().getCentre().toFloat();
         float distance = pos.getDistanceFrom(centre);
@@ -262,8 +272,43 @@ public:
         float ringInnerRadius = outerRadius * 0.75f;  // Larger hit area for outer ring
         float ringOuterRadius = outerRadius * 1.1f;
 
+        bool clickedOuterRing = (distance > ringInnerRadius && distance < ringOuterRadius);
+
+        // Handle right-click based on location
+        if (event.mods.isRightButtonDown())
+        {
+            if (clickedOuterRing)
+            {
+                // Right-click on outer ring: toggle bipolar/unipolar mode
+                isBipolar = !isBipolar;
+
+                // When switching to bipolar mode, convert negative values to positive
+                if (isBipolar && randomSlider.getValue() < 0.0)
+                {
+                    randomSlider.setValue(std::abs(randomSlider.getValue()), juce::sendNotificationAsync);
+                }
+
+                if (onBipolarModeChange)
+                    onBipolarModeChange(isBipolar);
+                repaint();
+            }
+            else
+            {
+                // Right-click on inner knob: toggle snap-to-quarter mode (only if available)
+                if (snapModeAvailable)
+                    setSnapMode(!snapModeEnabled);
+            }
+            return;
+        }
+
+        // Not a right-click - setup for dragging
+        dragStartValue = randomSlider.getValue();
+        dragStartY = event.position.y;
+        mainDragStartY = event.position.y;
+        mainDragStartValue = mainSlider.getValue();
+
         // Determine if clicking outer ring (for randomization) or inner knob (for main value)
-        if (distance > ringInnerRadius && distance < ringOuterRadius)
+        if (clickedOuterRing)
         {
             // Outer ring - control randomization
             isDraggingRandom = true;
@@ -324,12 +369,66 @@ public:
     juce::Slider& getMainSlider() { return mainSlider; }
     juce::Slider& getRandomSlider() { return randomSlider; }
 
+    // Snap-to-quarter mode control
+    void setSnapMode(bool enabled)
+    {
+        // Guard against redundant calls (prevent circular references)
+        if (snapModeEnabled == enabled)
+            return;
+
+        snapModeEnabled = enabled;
+
+        if (enabled)
+        {
+            // Store original intervals before enabling snap
+            originalMainInterval = mainSlider.getInterval();
+            originalRandomInterval = randomSlider.getInterval();
+
+            // Set quarter snapping (0.25 interval) for both sliders
+            auto mainRange = mainSlider.getRange();
+            mainSlider.setRange(mainRange.getStart(), mainRange.getEnd(), 0.25);
+
+            auto randomRange = randomSlider.getRange();
+            randomSlider.setRange(randomRange.getStart(), randomRange.getEnd(), 0.25 * visualRangeScale);
+
+            // Snap current values to nearest quarter
+            double currentMain = mainSlider.getValue();
+            mainSlider.setValue(std::round(currentMain / 0.25) * 0.25, juce::sendNotificationAsync);
+
+            double currentRandom = randomSlider.getValue();
+            if (std::abs(currentRandom) > 0.005)
+            {
+                double randomInterval = 0.25 * visualRangeScale;
+                randomSlider.setValue(std::round(currentRandom / randomInterval) * randomInterval, juce::sendNotificationAsync);
+            }
+        }
+        else
+        {
+            // Restore smooth dragging with original intervals
+            auto mainRange = mainSlider.getRange();
+            mainSlider.setRange(mainRange.getStart(), mainRange.getEnd(), originalMainInterval);
+
+            auto randomRange = randomSlider.getRange();
+            randomSlider.setRange(randomRange.getStart(), randomRange.getEnd(), originalRandomInterval);
+        }
+
+        // Notify listeners of snap mode change
+        if (onSnapModeChange)
+            onSnapModeChange(snapModeEnabled);
+
+        repaint();
+    }
+
+    bool isSnapModeEnabled() const { return snapModeEnabled; }
+
 private:
     juce::Slider mainSlider;
     juce::Slider randomSlider;
     bool isDraggingRandom = false;
     bool isDraggingMain = false;
     bool isBipolar = false;  // Default to unipolar mode
+    bool snapModeEnabled = false;  // Snap-to-quarter mode toggle
+    bool snapModeAvailable = false;  // Whether snap mode can be toggled (default: disabled)
     double dragStartValue = 0.0;
     float dragStartY = 0.0f;
     double mainDragStartValue = 0.0;
@@ -338,6 +437,8 @@ private:
     double randomDefaultValue = 0.0;  // Default value for random parameter
     float visualRangeScale = 1.0f;  // Scale factor for visual display (default 1.0 for backward compatibility)
     float randomSensitivity = 0.003f;  // Drag sensitivity for random slider (default 0.003, higher = more sensitive)
+    double originalMainInterval = 0.01;  // Store original main slider interval when snap mode is toggled
+    double originalRandomInterval = 0.01;  // Store original random slider interval when snap mode is toggled
 
     void updateRandomFromMouse(const juce::MouseEvent& event)
     {
@@ -398,6 +499,5 @@ private:
         mainSlider.setValue(newValue, juce::sendNotificationAsync);
         repaint();
     }
-
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DualSlider)
 };
