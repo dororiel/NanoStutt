@@ -1556,15 +1556,15 @@ void NanoStuttAudioProcessorEditor::updateNanoRatioFromVariant(int index)
     float ratio = variants[index][selectedIndex].ratio;
     ratio = juce::jlimit(0.1f, 4.0f, ratio);
 
-    // Suppress custom detection - variant selection is a valid choice within the current tuning system
+    // Suppress custom detection during variant selection (variant is part of tuning system)
     audioProcessor.setSuppressCustomDetection(true);
 
-    // Update parameter
+    // Update parameter (variant selection within tuning system)
     auto* param = audioProcessor.getParameters().getParameter("nanoRatio_" + juce::String(index));
     if (param != nullptr)
         param->setValueNotifyingHost(static_cast<float>((ratio - 0.1f) / (4.0f - 0.1f)));
 
-    // Re-enable custom detection
+    // Re-enable detection
     audioProcessor.setSuppressCustomDetection(false);
 }
 
@@ -1695,9 +1695,26 @@ void NanoStuttAudioProcessorEditor::updateNanoRatioUI()
             }
         }
     }
+}
 
-    // Trigger layout refresh
-    resized();
+void NanoStuttAudioProcessorEditor::refreshComboBoxesAndRatios()
+{
+    // Force ComboBoxAttachments to re-sync with current parameter values
+    // by recreating them - this ensures display matches actual parameter state
+    tuningSystemAttachment.reset();
+    tuningSystemAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getParameters(), "tuningSystem", tuningSystemMenu);
+
+    scaleAttachment.reset();
+    scaleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getParameters(), "scale", scaleMenu);
+
+    nanoBaseAttachment.reset();
+    nanoBaseAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getParameters(), "nanoBase", nanoBaseMenu);
+
+    // Update ratio displays
+    updateNanoRatioUI();
 }
 
 //==============================================================================

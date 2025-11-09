@@ -343,6 +343,7 @@ public:
     void updateNanoRatioFromSemitone(int index);
     void updateNanoRatioFromVariant(int index);  // Updates ratio from variant selector choice
     void updateNanoRatioUI();  // Updates all nano ratio displays based on current tuning system
+    void refreshComboBoxesAndRatios();  // Forces ComboBox attachment refresh and updates ratio displays
 
     // Preset management helper methods
     void updatePresetMenu();

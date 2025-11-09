@@ -253,23 +253,27 @@ private:
     // Ratio/denominator lookup
     static constexpr std::array<double, 12> regularDenominators {{ 1.0, 4.0/3.0, 2.0, 3.0, 4.0, 6.0, 16.0/3.0, 8.0, 12.0, 16.0, 24.0, 32.0 }};
     static constexpr std::array<float, 12> nanoRatios {{
-        1.0f,
-        15.0f / 16.0f,
-        5.0f / 6.0f,
-        4.0f / 5.0f,
-        3.0f / 4.0f,
-        2.0f / 3.0f,
-        3.0f / 5.0f,
-        0.5f,
-        1.0f, 1.0f, 1.0f, 1.0f  // Fillers
+        1.0f,           // C - Unison
+        1.059463094f,   // C# - Minor 2nd
+        1.122462048f,   // D - Major 2nd
+        1.189207115f,   // D# - Minor 3rd
+        1.259921050f,   // E - Major 3rd
+        1.334839854f,   // F - Perfect 4th
+        1.414213562f,   // F# - Tritone
+        1.498307077f,   // G - Perfect 5th
+        1.587401052f,   // G# - Minor 6th
+        1.681792831f,   // A - Major 6th
+        1.781797436f,   // A# - Minor 7th
+        1.887748625f    // B - Major 7th
     }};
 
     // Nano tuning system state
     NanoTuning::NanoBase currentNanoBase = NanoTuning::NanoBase::BPMSynced;
     NanoTuning::TuningSystem currentTuningSystem = NanoTuning::TuningSystem::EqualTemperament;
-    NanoTuning::Scale currentScale = NanoTuning::Scale::Chromatic;
+    NanoTuning::Scale currentScale = NanoTuning::Scale::NaturalMinor;
     std::array<float, 12> runtimeNanoRatios = nanoRatios; // Runtime-modifiable copy
     bool suppressCustomDetection = false;  // Suppress detection during programmatic updates
+    std::atomic<bool> pendingUIUpdate {false};  // Debounce UI update callbacks
 
     // Param listeners
     void updateCachedParameters();

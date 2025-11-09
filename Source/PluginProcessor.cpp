@@ -18,6 +18,8 @@ NanoStuttAudioProcessor::NanoStuttAudioProcessor()
       presetManager(parameters)
 {
     initializeParameterListeners();
+    updateNanoRatiosFromTuning();     // Initialize ratios from default tuning system
+    updateNanoVisibilityFromScale();  // Initialize scale slider visibility
 }
 
 NanoStuttAudioProcessor::~NanoStuttAudioProcessor()
@@ -1683,7 +1685,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         juce::ParameterID("scale", 1), "Scale",
         juce::StringArray { "Chromatic", "Major", "Natural Minor", "Major Pentatonic", "Minor Pentatonic",
                            "Dorian", "Phrygian", "Lydian", "Mixolydian", "Aeolian", "Locrian",
-                           "Harmonic Minor", "Melodic Minor", "Whole Tone", "Diminished", "Custom" }, 0));
+                           "Harmonic Minor", "Melodic Minor", "Whole Tone", "Diminished", "Custom" }, 2));
 
     for (int i = 0; i < 12; ++i)
     {
@@ -1801,9 +1803,8 @@ void NanoStuttAudioProcessor::updateCachedParameters()
 
 void NanoStuttAudioProcessor::updateNanoRatiosFromTuning()
 {
-    // Get current tuning system from parameter
-    int tuningIndex = static_cast<int>(parameters.getRawParameterValue("tuningSystem")->load());
-    NanoTuning::TuningSystem tuning = static_cast<NanoTuning::TuningSystem>(tuningIndex);
+    // Use current tuning system from member variable (already updated by parameterChanged)
+    NanoTuning::TuningSystem tuning = currentTuningSystem;
 
     // Don't update if Custom mode is selected (either Fraction or Decimal)
     if (tuning == NanoTuning::TuningSystem::CustomFraction || tuning == NanoTuning::TuningSystem::CustomDecimal)
@@ -1829,14 +1830,21 @@ void NanoStuttAudioProcessor::updateNanoRatiosFromTuning()
     // Re-enable custom detection
     suppressCustomDetection = false;
 
-    currentTuningSystem = tuning;
+    // Notify editor to update UI after all parameters have been updated
+    // Only queue callback if one isn't already pending (debouncing)
+    if (!pendingUIUpdate.exchange(true)) {
+        juce::MessageManager::callAsync([this]() {
+            pendingUIUpdate = false;
+            if (auto* editor = dynamic_cast<NanoStuttAudioProcessorEditor*>(getActiveEditor()))
+                editor->refreshComboBoxesAndRatios();
+        });
+    }
 }
 
 void NanoStuttAudioProcessor::updateNanoVisibilityFromScale()
 {
-    // Get current scale from parameter
-    int scaleIndex = static_cast<int>(parameters.getRawParameterValue("scale")->load());
-    NanoTuning::Scale scale = static_cast<NanoTuning::Scale>(scaleIndex);
+    // Use current scale from member variable (already updated by parameterChanged)
+    NanoTuning::Scale scale = currentScale;
 
     // Don't update if Custom is selected
     if (scale == NanoTuning::Scale::Custom)
@@ -1859,7 +1867,15 @@ void NanoStuttAudioProcessor::updateNanoVisibilityFromScale()
     // Re-enable custom detection
     suppressCustomDetection = false;
 
-    currentScale = scale;
+    // Notify editor to update UI after all parameters have been updated
+    // Only queue callback if one isn't already pending (debouncing)
+    if (!pendingUIUpdate.exchange(true)) {
+        juce::MessageManager::callAsync([this]() {
+            pendingUIUpdate = false;
+            if (auto* editor = dynamic_cast<NanoStuttAudioProcessorEditor*>(getActiveEditor()))
+                editor->refreshComboBoxesAndRatios();
+        });
+    }
 }
 
 void NanoStuttAudioProcessor::detectCustomTuning()
@@ -1989,11 +2005,13 @@ void NanoStuttAudioProcessor::parameterChanged(const juce::String& parameterID, 
     if (parameterID == "nanoBase")
     {
         currentNanoBase = static_cast<NanoTuning::NanoBase>(static_cast<int>(newValue));
+        updateNanoRatiosFromTuning();
     }
     // Handle tuning system changes
     else if (parameterID == "tuningSystem")
     {
         int tuningIndex = static_cast<int>(newValue);
+        currentTuningSystem = static_cast<NanoTuning::TuningSystem>(tuningIndex);
         // Only update ratios if not in a custom mode
         if (tuningIndex != static_cast<int>(NanoTuning::TuningSystem::CustomFraction) &&
             tuningIndex != static_cast<int>(NanoTuning::TuningSystem::CustomDecimal))
@@ -2005,6 +2023,7 @@ void NanoStuttAudioProcessor::parameterChanged(const juce::String& parameterID, 
     else if (parameterID == "scale")
     {
         int scaleIndex = static_cast<int>(newValue);
+        currentScale = static_cast<NanoTuning::Scale>(scaleIndex);
         if (scaleIndex != static_cast<int>(NanoTuning::Scale::Custom))
         {
             updateNanoVisibilityFromScale();
@@ -2013,12 +2032,17 @@ void NanoStuttAudioProcessor::parameterChanged(const juce::String& parameterID, 
     // Detect custom tuning when ratio parameters change
     else if (parameterID.startsWith("nanoRatio_"))
     {
-        // Update runtime ratios array
+        // ALWAYS update runtime ratios array (needed for audio thread)
         for (int i = 0; i < 12; ++i)
         {
             runtimeNanoRatios[i] = parameters.getRawParameterValue("nanoRatio_" + juce::String(i))->load();
         }
-        detectCustomTuning();  // Only check tuning, not scale
+
+        // ONLY skip detection if suppressed (during programmatic updates like variant selection)
+        if (!suppressCustomDetection)
+        {
+            detectCustomTuning();  // Only check tuning, not scale
+        }
     }
     // Detect custom scale when active state parameters change
     else if (parameterID.startsWith("nanoActive_"))
