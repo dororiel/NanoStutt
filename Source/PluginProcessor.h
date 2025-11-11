@@ -211,6 +211,24 @@ private:
     bool wasPlaying = false;
     double lastPpqPosition = -1.0;
 
+    // Transport stop fade-to-dry mechanism
+    bool isFadingToStopTransport = false;
+    int stopFadeRemainingSamples = 0;
+    float stopFadeStartDryGain = 0.0f;
+    float stopFadeStartWetGain = 0.0f;
+    // Stutter state snapshot for stop fade playback continuation
+    int stopFadeStutterPlayCounter = 0;
+    int stopFadeMacroEnvelopeCounter = 0;
+    int stopFadeLoopLen = 0;
+    int stopFadeChosenDenominator = 1;
+    // EMA filter state snapshot for stop fade continuation
+    std::vector<float> stopFadeEmaState;
+    float stopFadeNanoSmoothParam = 0.0f;
+
+    // Loop boundary handling - prevent clicks at first sample after jump
+    bool skipFadeOnNextSample = false;
+    int samplesProcessedAfterJump = 0;
+
     // State flags for processBlock (moved from static variables)
     bool parametersSampledForUpcomingEvent = false;
     bool stutterInitialized = false;

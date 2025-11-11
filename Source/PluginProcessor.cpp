@@ -217,9 +217,32 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     auto cachedQuantWeights = quantUnitWeights;
     float cachedNanoBlend = nanoBlend;
 
-    // TRANSPORT STATE DETECTION AND QUANTIZATION RESET
-    if (!isPlaying) {
-        // Transport is not playing, pass through dry audio and reset stutter state
+    // TRANSPORT STATE DETECTION AND STOP FADE
+    bool transportJustStopped = wasPlaying && !isPlaying;
+
+    if (transportJustStopped && autoStutterActive) {
+        // Transport stopped while stuttering - trigger 1ms fade to dry/silence
+        isFadingToStopTransport = true;
+        stopFadeRemainingSamples = fadeLengthInSamples;
+
+        // Store current gains to fade from
+        auto mixMode = (int) params.getRawParameterValue("MixMode")->load();
+        stopFadeStartDryGain = 0.0f;  // We're stuttering, so dry is silent
+        stopFadeStartWetGain = 1.0f;  // Wet signal is active
+
+        // Snapshot stutter playback state to continue during fade
+        stopFadeStutterPlayCounter = stutterPlayCounter;
+        stopFadeMacroEnvelopeCounter = macroEnvelopeCounter;
+        stopFadeLoopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate + 1), 1, maxStutterLenSamples);
+        stopFadeChosenDenominator = chosenDenominator;
+
+        // Snapshot EMA filter state for nano smooth continuation
+        stopFadeEmaState = nanoEmaState;
+        stopFadeNanoSmoothParam = currentNanoSmoothParam;
+    }
+
+    if (!isPlaying && !isFadingToStopTransport) {
+        // Transport is not playing and no fade in progress - pass through dry audio and reset stutter state
         autoStutterActive = false;
         parametersHeld = false;
         wasPlaying = false;
@@ -234,6 +257,27 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     bool positionJumped = wasPlaying && std::abs(currentPpqPosition - lastPpqPosition) > THIRTY_SECOND_NOTE_PPQ; // Allow small timing variations
 
     if (transportJustStarted || positionJumped) {
+        // Clear buffers on transport start to prevent stale audio clicks
+        if (transportJustStarted) {
+            stutterBuffer.clear();
+            outputBuffer.clear();
+            std::fill(stutterStateBuffer.begin(), stutterStateBuffer.end(), 0);
+
+            // Reset EMA filter state to prevent clicks with nano smooth
+            std::fill(nanoEmaState.begin(), nanoEmaState.end(), 0.0f);
+            std::fill(dryEmaStateForFade.begin(), dryEmaStateForFade.end(), 0.0f);
+
+            // Reset stop fade state
+            isFadingToStopTransport = false;
+            stopFadeRemainingSamples = 0;
+        }
+
+        // Set flag to handle first sample after position jump carefully
+        if (positionJumped) {
+            skipFadeOnNextSample = true;
+            samplesProcessedAfterJump = 0;
+        }
+
         // Reset quantization alignment based on new PPQ position
         // Find the smallest active quantization unit to align to its grid
         static const std::array<double, 9> quantUnits = {
@@ -386,6 +430,85 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
     for (int i = 0; i < numSamples; ++i)
     {
+        // =============================================================================
+        // TRANSPORT STOP FADE PROCESSING
+        // When transport stops mid-stutter, fade to dry/silence over 1ms
+        // Continue stutter playback and apply envelopes for smooth fadeout
+        // =============================================================================
+        if (isFadingToStopTransport) {
+            if (stopFadeRemainingSamples > 0) {
+                // Calculate fade progress
+                float fadeProgress = 1.0f - ((float)stopFadeRemainingSamples / (float)fadeLengthInSamples);
+                float wetGain = stopFadeStartWetGain * (1.0f - fadeProgress);
+                float dryGain = 1.0f * fadeProgress;  // Fade to full dry
+
+                // Calculate stutter playback position (continue from snapshot)
+                int loopPos = stopFadeStutterPlayCounter % stopFadeLoopLen;
+                int readIndex = currentStutterIsReversed
+                    ? (stutterWritePos - loopPos + maxStutterLenSamples) % maxStutterLenSamples
+                    : (stutterWritePos + loopPos) % maxStutterLenSamples;
+
+                // Calculate macro envelope gain
+                float macroProgress = (float)stopFadeMacroEnvelopeCounter / (float)std::max(1, macroEnvelopeLengthInSamples);
+                macroProgress = juce::jlimit(0.0f, 1.0f, macroProgress);
+                float macroGain = calculateEnvelopeGain(macroProgress, currentMacroShapeParam);
+
+                // Apply macro smooth fade-in if needed
+                float macroSmoothAmount = currentMacroSmoothParam * MACRO_SMOOTH_SCALE;
+                if (macroSmoothAmount > 0.0f && macroProgress < macroSmoothAmount) {
+                    float fadeInGain = macroProgress / macroSmoothAmount;
+                    macroGain *= fadeInGain;
+                }
+
+                // Calculate nano envelope gain
+                float nanoGateMultiplier = NANO_GATE_MIN + currentNanoGateParam * NANO_GATE_RANGE;
+                int nanoEnvLen = std::max(1, static_cast<int>(stopFadeLoopLen * nanoGateMultiplier));
+                float nanoGain = 1.0f;
+                if (loopPos < nanoEnvLen) {
+                    float nanoProgress = (float)loopPos / (float)nanoEnvLen;
+                    nanoGain = calculateEnvelopeGain(nanoProgress, currentNanoShapeParam);
+                }
+
+                // Combine envelope gains
+                float envelopeGain = macroGain * nanoGain;
+
+                // Calculate EMA alpha for nano smooth filtering
+                float nanoSmoothAlpha = 1.0f - (stopFadeNanoSmoothParam * NANO_EMA_ALPHA_RANGE);
+                nanoSmoothAlpha = juce::jlimit(NANO_EMA_MIN_ALPHA, 1.0f, nanoSmoothAlpha);
+
+                // Process crossfade for all channels
+                for (int ch = 0; ch < totalNumOutputChannels; ++ch) {
+                    float drySample = buffer.getSample(ch, i);
+                    float wetSample = stutterBuffer.getSample(ch, readIndex);
+
+                    // Apply EMA filtering with snapshotted state (continue filtering from where we left off)
+                    if (stopFadeNanoSmoothParam > 0.0f && ch < stopFadeEmaState.size()) {
+                        wetSample = nanoSmoothAlpha * wetSample + (1.0f - nanoSmoothAlpha) * stopFadeEmaState[ch];
+                        stopFadeEmaState[ch] = wetSample;  // Update state for next sample
+                    }
+
+                    float processedWetSample = wetSample * envelopeGain * wetGain;
+                    buffer.setSample(ch, i, processedWetSample + drySample * dryGain);
+                }
+
+                // Increment counters to continue playback
+                ++stopFadeStutterPlayCounter;
+                ++stopFadeMacroEnvelopeCounter;
+                --stopFadeRemainingSamples;
+            } else {
+                // Fade complete - reset all stutter state
+                isFadingToStopTransport = false;
+                autoStutterActive = false;
+                parametersHeld = false;
+                writePos = 0;
+                currentlyUsingNanoRate.store(false);
+                currentNanoFrequency.store(0.0f);
+            }
+
+            // Skip remaining processing for this sample
+            continue;
+        }
+
         double currentPpq = ppqAtStartOfBlock + (i * ppqPerSample);
 
         // Fixed quantization logic: 1/32nd static beat detection
@@ -911,8 +1034,21 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         bool isFadingDryToStutter = false;      // Flag for gradual EMA during Dry→Stutter fade
         float dryFadeProgress = 0.0f;           // Fade progress for EMA ramping
 
+        // Loop boundary handling: Skip fade calculation for first sample after position jump
+        // This prevents discontinuities when loop point coincides with beat boundaries
+        bool isFirstSampleAfterJump = skipFadeOnNextSample && (samplesProcessedAfterJump == 0);
+        if (skipFadeOnNextSample) {
+            samplesProcessedAfterJump++;
+            // Only skip the very first sample, then allow normal processing
+            if (samplesProcessedAfterJump >= 2) {
+                skipFadeOnNextSample = false;
+            }
+        }
+
         // Gate mode: only fade when transitioning INTO a stutter (skip unnecessary fades)
         bool shouldProcessFade = (samplesToNextBeat <= fadeLengthInSamples && samplesToNextBeat >= 0 && (quantCount+1) == quantToNewBeat);
+        // Don't apply fade to the very first sample after position jump
+        shouldProcessFade = shouldProcessFade && !isFirstSampleAfterJump;
         bool shouldFadeInGateMode = (mixMode != 0) || stutterIsScheduled;
 
         if (shouldProcessFade && shouldFadeInGateMode) {
