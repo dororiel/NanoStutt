@@ -68,8 +68,7 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
   - Snap state saved in presets for consistent behavior across sessions
 - **Nano Shape**: Loop envelope curve (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
 - **Nano Octave**: Octave offset control (-1 to +3, integer steps) with randomization (±4 octaves) for pitch shifting effects
-- **Nano Smooth**: EMA low-pass filter (0.0-1.0) - exponential moving average smoothing with alpha coefficient mapping (0.0 = bypass, 1.0 = maximum smoothing)
-- **Cycle Crossfade**: Smoothing at nano cycle boundaries (0.0-1.0) - enables continuous EMA state through loop wraparound
+- **Nano Smooth**: Hann window envelope smoothing (0.0-1.0) applied per repeat cycle - at 0.0 no smoothing, at 1.0 full Hann window applied to gated portion of envelope
 
 #### Macro Envelope (Event-level Control)
 - **Macro Gate**: Overall event duration (0.25-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
@@ -77,7 +76,15 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
   - Snap mode quantizes gate values and randomization to quarter increments (0.25, 0.5, 0.75, 1.0)
   - Snap state saved in presets for consistent behavior across sessions
 - **Macro Shape**: Event envelope curve (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
-- **Macro Smooth**: Event boundary smoothing (0.0-1.0)
+- **Macro Smooth**: Hann window envelope smoothing (0.0-1.0) applied to entire stutter event - at 0.0 no smoothing, at 1.0 full Hann window applied
+
+#### Damping Section
+- **EMA Filter**: Exponential moving average low-pass filter (0.0-1.0) - alpha coefficient mapping (0.0 = bypass, 1.0 = maximum smoothing)
+  - Per-channel state tracking with intelligent reset logic for reverse mode
+  - Applied after nano envelope in signal chain
+- **Cycle Crossfade**: Envelope-aware crossfading at nano cycle boundaries (0.0-1.0)
+  - Smooths loop transitions with automatic envelope gain tracking
+  - Applied before Hann windowing for click-free operation
 
 ### Mix Modes
 - **Gate Mode**: Traditional gated stutter with silence gaps
@@ -188,6 +195,27 @@ make -j4
 - Manual stutter buttons may need GUI integration
 
 ### Recent Improvements
+- **Refactored Smoothing System with Hann Windowing** - separated EMA filtering from envelope smoothing
+  - Renamed "Nano Smooth" → "EMA Filter" and moved to new "Damping" section with Cycle Crossfade
+  - Implemented NEW "Nano Smooth" using true Hann window (0.5 * (1 - cos(2π × progress)))
+  - Applied per repeat cycle to gated portion of nano envelope (resampled at wraparound)
+  - Converted "Macro Smooth" from linear fade to Hann window applied to entire event envelope
+  - Hann windowing brings edges to zero volume at maximum setting, making crossfades nearly invisible
+  - Parameter held constant per cycle to prevent automation bleeding and crossfade mismatches
+- **Fixed Critical Reverse Stutter Bugs** - comprehensive fix for crossfade and EMA issues in reverse mode
+  - Fixed forward crossfade head envelope position (countdown formula: crossfadeLen - 1 - tailOffset)
+  - Fixed reverse crossfade head envelope position (off-by-one: loopPos + 1)
+  - Fixed reverse crossfade tail position (correct formula: loopLen - 1 - loopPos for backwards reading)
+  - Fixed EMA reset logic to account for reverse envelope direction reversal at wraparound
+  - EMA now always resets at reverse cycle boundaries regardless of crossfade state
+  - Eliminated "exponential fading" artifact caused by incorrect tail buffer position
+  - Resolved crossfade boundary discontinuities when both nano smooth and xfade are active
+- **UI Layout Improvements** - optimized left panel spacing and tuner positioning
+  - Increased row gap between envelope controls for better visual separation
+  - Reduced knob value textbox height from 20px to 16px for more compact layout
+  - Removed section gaps for tighter grouping of envelope controls
+  - Repositioned tuner to match nano preset height (22px) and moved closer to visualizer (2px gap)
+  - All three envelope sections (Macro, Nano, Damping) now visible without clipping
 - **Added Snap-to-Quarter Mode for Gate Controls** - precision gate value control with visual feedback
   - Right-click inner knob on nano/macro gate to toggle snap mode
   - Cyan ring indicator shows when snap mode is active

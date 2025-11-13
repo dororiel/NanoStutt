@@ -131,7 +131,8 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     // Real-time envelope parameters (0.3ms smoothing)
     smoothedNanoGate.reset(sampleRate, smoothingTime0_3ms);
     smoothedNanoShape.reset(sampleRate, smoothingTime0_3ms);
-    smoothedNanoSmooth.reset(sampleRate, smoothingTime0_3ms);
+    smoothedNanoSmooth.reset(sampleRate, smoothingTime0_3ms);      // Hann window smoothing
+    smoothedNanoEma.reset(sampleRate, smoothingTime0_3ms);         // EMA filter
     smoothedMacroGate.reset(sampleRate, smoothingTime0_3ms);
     smoothedMacroShape.reset(sampleRate, smoothingTime0_3ms);
     smoothedMacroSmooth.reset(sampleRate, smoothingTime0_3ms);
@@ -144,6 +145,7 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     smoothedNanoGate.setCurrentAndTargetValue(parameters.getRawParameterValue("NanoGate")->load());
     smoothedNanoShape.setCurrentAndTargetValue(parameters.getRawParameterValue("NanoShape")->load());
     smoothedNanoSmooth.setCurrentAndTargetValue(parameters.getRawParameterValue("NanoSmooth")->load());
+    smoothedNanoEma.setCurrentAndTargetValue(parameters.getRawParameterValue("NanoEmaFilter")->load());
     smoothedMacroGate.setCurrentAndTargetValue(parameters.getRawParameterValue("MacroGate")->load());
     smoothedMacroShape.setCurrentAndTargetValue(parameters.getRawParameterValue("MacroShape")->load());
     smoothedMacroSmooth.setCurrentAndTargetValue(parameters.getRawParameterValue("MacroSmooth")->load());
@@ -158,6 +160,7 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     currentNanoGateParam = parameters.getRawParameterValue("NanoGate")->load();
     currentNanoShapeParam = parameters.getRawParameterValue("NanoShape")->load();
     currentNanoSmoothParam = parameters.getRawParameterValue("NanoSmooth")->load();
+    currentNanoEmaParam = parameters.getRawParameterValue("NanoEmaFilter")->load();
 
     nextMacroGateParam = currentMacroGateParam;
     nextMacroShapeParam = currentMacroShapeParam;
@@ -165,6 +168,7 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     nextNanoGateParam = currentNanoGateParam;
     nextNanoShapeParam = currentNanoShapeParam;
     nextNanoSmoothParam = currentNanoSmoothParam;
+    nextNanoEmaParam = currentNanoEmaParam;
 }
 
 void NanoStuttAudioProcessor::releaseResources()
@@ -226,7 +230,6 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         stopFadeRemainingSamples = fadeLengthInSamples;
 
         // Store current gains to fade from
-        auto mixMode = (int) params.getRawParameterValue("MixMode")->load();
         stopFadeStartDryGain = 0.0f;  // We're stuttering, so dry is silent
         stopFadeStartWetGain = 1.0f;  // Wet signal is active
 
@@ -236,9 +239,9 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         stopFadeLoopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate + 1), 1, maxStutterLenSamples);
         stopFadeChosenDenominator = chosenDenominator;
 
-        // Snapshot EMA filter state for nano smooth continuation
+        // Snapshot EMA filter state for nano EMA continuation
         stopFadeEmaState = nanoEmaState;
-        stopFadeNanoSmoothParam = currentNanoSmoothParam;
+        stopFadeNanoEmaParam = currentNanoEmaParam;
     }
 
     if (!isPlaying && !isFadingToStopTransport) {
@@ -357,6 +360,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     smoothedNanoGate.setTargetValue(params.getRawParameterValue("NanoGate")->load());
     smoothedNanoShape.setTargetValue(params.getRawParameterValue("NanoShape")->load());
     smoothedNanoSmooth.setTargetValue(params.getRawParameterValue("NanoSmooth")->load());
+    smoothedNanoEma.setTargetValue(params.getRawParameterValue("NanoEmaFilter")->load());
     smoothedMacroGate.setTargetValue(params.getRawParameterValue("MacroGate")->load());
     smoothedMacroShape.setTargetValue(params.getRawParameterValue("MacroShape")->load());
     smoothedMacroSmooth.setTargetValue(params.getRawParameterValue("MacroSmooth")->load());
@@ -453,11 +457,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 macroProgress = juce::jlimit(0.0f, 1.0f, macroProgress);
                 float macroGain = calculateEnvelopeGain(macroProgress, currentMacroShapeParam);
 
-                // Apply macro smooth fade-in if needed
-                float macroSmoothAmount = currentMacroSmoothParam * MACRO_SMOOTH_SCALE;
-                if (macroSmoothAmount > 0.0f && macroProgress < macroSmoothAmount) {
-                    float fadeInGain = macroProgress / macroSmoothAmount;
-                    macroGain *= fadeInGain;
+                // Apply macro smooth (Hann window) if needed
+                if (currentMacroSmoothParam > 0.01f) {
+                    float hannGain = calculateHannWindow(macroProgress);
+                    macroGain *= (1.0f - currentMacroSmoothParam) + (currentMacroSmoothParam * hannGain);
                 }
 
                 // Calculate nano envelope gain
@@ -472,8 +475,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Combine envelope gains
                 float envelopeGain = macroGain * nanoGain;
 
-                // Calculate EMA alpha for nano smooth filtering
-                float nanoSmoothAlpha = 1.0f - (stopFadeNanoSmoothParam * NANO_EMA_ALPHA_RANGE);
+                // Calculate EMA alpha for nano EMA filtering
+                float nanoSmoothAlpha = 1.0f - (stopFadeNanoEmaParam * NANO_EMA_ALPHA_RANGE);
                 nanoSmoothAlpha = juce::jlimit(NANO_EMA_MIN_ALPHA, 1.0f, nanoSmoothAlpha);
 
                 // Process crossfade for all channels
@@ -482,7 +485,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     float wetSample = stutterBuffer.getSample(ch, readIndex);
 
                     // Apply EMA filtering with snapshotted state (continue filtering from where we left off)
-                    if (stopFadeNanoSmoothParam > 0.0f && ch < stopFadeEmaState.size()) {
+                    if (stopFadeNanoEmaParam > 0.0f && ch < stopFadeEmaState.size()) {
                         wetSample = nanoSmoothAlpha * wetSample + (1.0f - nanoSmoothAlpha) * stopFadeEmaState[ch];
                         stopFadeEmaState[ch] = wetSample;  // Update state for next sample
                     }
@@ -677,7 +680,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // This ensures fades use the correct randomized values
                     currentNanoGateParam = nextNanoGateParam;
                     currentNanoShapeParam = nextNanoShapeParam;
-                    currentNanoSmoothParam = nextNanoSmoothParam;
+                    currentNanoSmoothParam = nextNanoSmoothParam;      // Hann window smoothing
+                    currentNanoEmaParam = nextNanoEmaParam;            // EMA filter
                     currentNanoOctaveParam = nextNanoOctaveParam;
 
                     // Note: heldNanoGateRandomOffset and heldNanoShapeRandomOffset were already set at Decision Point 2
@@ -692,12 +696,18 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                     // Transfer EMA state from crossfade to wet processing for seamless continuation
                     // Scale by first sample's envelope gain to prevent jumps when shape curve starts near zero
-                    if (currentNanoSmoothParam > 0.0f) {  // Only if EMA filtering is active
+                    if (currentNanoEmaParam > 0.0f) {  // Only if EMA filtering is active
                         // Calculate what the first sample's nano envelope gain will be (progress = 0.0)
                         float firstSampleNanoGain = calculateEnvelopeGain(0.0f, currentNanoShapeParam);
 
+                        // Apply Hann window if nano smooth is active (must match first sample processing)
+                        if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
+                            float hannGain = calculateHannWindow(0.0f);  // First sample at progress 0.0
+                            firstSampleNanoGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * hannGain);
+                        }
+
                         for (int ch = 0; ch < totalNumOutputChannels; ++ch) {
-                            // Scale transferred state by first sample gain to respect envelope curve
+                            // Scale transferred state by first sample gain to respect envelope curve and Hann window
                             nanoEmaState[ch] = dryEmaStateForFade[ch] * firstSampleNanoGain;
                         }
                     }
@@ -867,7 +877,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     nextNanoGateParam = std::round(nextNanoGateParam / 0.25f) * 0.25f;
 
                 nextNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + nanoShapeRandomOffset);
-                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
+                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();      // Hann window smoothing
+                nextNanoEmaParam = params.getRawParameterValue("NanoEmaFilter")->load();      // EMA filter
 
                 // Apply octave random offset (round base and clamp result)
                 float nanoOctaveBase = std::round(params.getRawParameterValue("NanoOctave")->load());
@@ -995,7 +1006,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     nextNanoGateParam = std::round(nextNanoGateParam / 0.25f) * 0.25f;
 
                 nextNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + nanoShapeRandomOffset);
-                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();
+                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();      // Hann window smoothing
+                nextNanoEmaParam = params.getRawParameterValue("NanoEmaFilter")->load();      // EMA filter
 
                 heldNanoGateRandomOffset = nanoGateRandomOffset;
                 heldNanoShapeRandomOffset = nanoShapeRandomOffset;
@@ -1077,10 +1089,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
                 float nextFirstSampleMacroGain = calculateEnvelopeGain(firstSampleProgress, nextMacroShapeParam);
 
-                float macroSmoothAmount = nextMacroSmoothParam * MACRO_SMOOTH_SCALE;
-                if (macroSmoothAmount > 0.0f && firstSampleProgress < macroSmoothAmount) {
-                    float fadeInGain = firstSampleProgress / macroSmoothAmount;
-                    nextFirstSampleMacroGain *= fadeInGain;
+                // Apply Hann window smoothing if enabled
+                if (nextMacroSmoothParam > 0.01f) {
+                    float hannGain = calculateHannWindow(firstSampleProgress);
+                    nextFirstSampleMacroGain *= (1.0f - nextMacroSmoothParam) + (nextMacroSmoothParam * hannGain);
                 }
 
                 // Calculate nano envelope gain for first sample (using NEXT parameters - what we're fading to)
@@ -1088,6 +1100,12 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 int nanoEnvelopeLengthSamples = std::max(1, static_cast<int>(stutterEventLengthSamples / chosenDenominator * nanoGateMultiplier));
                 float firstSampleNanoProgress = 1.0f / (float)nanoEnvelopeLengthSamples;
                 float nextFirstSampleNanoGain = calculateEnvelopeGain(firstSampleNanoProgress, nextNanoShapeParam);
+
+                // Apply Hann window smoothing to nano gain if enabled (for accurate fade target)
+                if (nextNanoSmoothParam > 0.01f && nanoEnvelopeLengthSamples > 0) {
+                    float hannGain = calculateHannWindow(firstSampleNanoProgress);
+                    nextFirstSampleNanoGain *= (1.0f - nextNanoSmoothParam) + (nextNanoSmoothParam * hannGain);
+                }
 
                 // Combine macro and nano gains for accurate first sample gain
                 float nextFirstSampleGain = nextFirstSampleMacroGain * nextFirstSampleNanoGain;
@@ -1106,10 +1124,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
                 float nextFirstSampleMacroGain = calculateEnvelopeGain(firstSampleProgress, nextMacroShapeParam);
 
-                float macroSmoothAmount = nextMacroSmoothParam * MACRO_SMOOTH_SCALE;
-                if (macroSmoothAmount > 0.0f && firstSampleProgress < macroSmoothAmount) {
-                    float fadeInGain = firstSampleProgress / macroSmoothAmount;
-                    nextFirstSampleMacroGain *= fadeInGain;
+                // Apply Hann window smoothing if enabled
+                if (nextMacroSmoothParam > 0.01f) {
+                    float hannGain = calculateHannWindow(firstSampleProgress);
+                    nextFirstSampleMacroGain *= (1.0f - nextMacroSmoothParam) + (nextMacroSmoothParam * hannGain);
                 }
 
                 // Calculate nano envelope gain for first sample (using NEXT parameters - what we're fading to)
@@ -1117,6 +1135,12 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 int nanoEnvelopeLengthSamples = std::max(1, static_cast<int>(stutterEventLengthSamples / chosenDenominator * nanoGateMultiplier));
                 float firstSampleNanoProgress = 1.0f / (float)nanoEnvelopeLengthSamples;
                 float nextFirstSampleNanoGain = calculateEnvelopeGain(firstSampleNanoProgress, nextNanoShapeParam);
+
+                // Apply Hann window smoothing to nano gain if enabled (for accurate fade target)
+                if (nextNanoSmoothParam > 0.01f && nanoEnvelopeLengthSamples > 0) {
+                    float hannGain = calculateHannWindow(firstSampleNanoProgress);
+                    nextFirstSampleNanoGain *= (1.0f - nextNanoSmoothParam) + (nextNanoSmoothParam * hannGain);
+                }
 
                 // Combine macro and nano gains for accurate first sample gain
                 float nextFirstSampleGain = nextFirstSampleMacroGain * nextFirstSampleNanoGain;
@@ -1159,10 +1183,11 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
         // Pre-calculate all smoothed parameters ONCE per sample (before channel loop)
         // Real-time parameters (always advance smoothly)
-        // Note: smoothNanoGate and smoothNanoSmooth are advanced but not used (randomized values held per event)
+        // Note: smoothNanoGate, smoothNanoSmooth, and smoothNanoEma are advanced but not used (randomized values held per event)
         smoothedNanoGate.getNextValue();
         float smoothNanoShape = smoothedNanoShape.getNextValue();
         smoothedNanoSmooth.getNextValue();
+        smoothedNanoEma.getNextValue();
 
         // Advance macro smoothed parameters (needed for proper ramp behavior, even if not used directly)
         smoothedMacroShape.getNextValue();
@@ -1205,20 +1230,27 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float nanoShapeBase = smoothNanoShape;
                 currentNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + heldNanoShapeRandomOffset);
 
-                // NanoSmooth: Resample (no randomization)
-                currentNanoSmoothParam = smoothedNanoSmooth.getCurrentValue();
+                // NanoSmooth (Hann window): NOT resampled per cycle
+                // Held constant from Decision Point 1 to ensure crossfade target matches actual gain
+                // This prevents mismatches when nano smooth is automated during a cycle
+                // (currentNanoSmoothParam set at line 683, swapped from nextNanoSmoothParam)
 
-                // Calculate EMA alpha coefficient from nano smooth parameter
+                // NanoEmaFilter: Resample (no randomization)
+                currentNanoEmaParam = smoothedNanoEma.getCurrentValue();
+
+                // Calculate EMA alpha coefficient from EMA filter parameter
                 // 0.0 = bypass (alpha=1.0), 1.0 = max smooth (alpha=0.05)
-                currentNanoEmaAlpha = 1.0f - (currentNanoSmoothParam * NANO_EMA_ALPHA_RANGE);
+                currentNanoEmaAlpha = 1.0f - (currentNanoEmaParam * NANO_EMA_ALPHA_RANGE);
 
                 // Set flag to reset EMA state at next sample (loop wraparound)
                 // Skip reset if cycle crossfade is active (EMA continues smoothly through crossfade)
+                // EXCEPT in reverse mode where envelope direction reverses (always reset to prevent discontinuity)
                 float cycleCrossfade = parameters.getRawParameterValue("CycleCrossfade")->load();
-                if (cycleCrossfade < 0.01f) {
+                if (cycleCrossfade < 0.01f || (currentStutterIsReversed && firstRepeatCyclePlayed)) {
                     shouldResetEmaState = true;
                 }
-                // With crossfade enabled, EMA state persists through transition
+                // With crossfade enabled in FORWARD mode, EMA state persists through transition
+                // In REVERSE mode, envelope profile reverses at boundary (gain discontinuity) → always reset
 
                 // Pre-calculate nano envelope length for this cycle (using randomized nanoGate value)
                 float nanoGateMultiplier = NANO_GATE_MIN + currentNanoGateParam * NANO_GATE_RANGE;
@@ -1300,6 +1332,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // else: nanoGain stays 0.0 (silent after heldNanoEnvelopeLengthInSamples)
                 }
 
+                // NANO SMOOTH (Hann window over gated portion of repeat cycle)
+                // 0.0 = no Hann (bypass), 1.0 = full Hann window applied to gated region
+                // Apply Hann window based on position within gated region (correlates with gate value)
+                if (currentNanoSmoothParam > 0.01f && nanoGain > 0.0f && heldNanoEnvelopeLengthInSamples > 0) {
+                    // Calculate progress through gated region (nanoProgress is already 0.0 → 1.0 within gate)
+                    // Use nanoProgress which was calculated above for forward/reverse cases
+                    float hannGain = calculateHannWindow(nanoProgress);
+                    // Blend between original envelope (no smooth) and Hann-windowed envelope (full smooth)
+                    nanoGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * hannGain);
+                }
+
                 // MACRO ENVELOPE (controls overall event shape)
                 // Use CURRENT parameters (per event) for stable, event-locked envelope behavior
                 float macroGateScale = juce::jlimit(MACRO_GATE_MIN, 1.0f, smoothHeldMacroGate);
@@ -1307,14 +1350,13 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float macroProgress = juce::jlimit(0.0f, 1.0f, (float)macroEnvelopeCounter / (float)effectiveMacroLength);
                 float macroGain = calculateEnvelopeGain(macroProgress, currentMacroShapeParam);
 
-                // Apply macro smooth fades (using current parameters for event-locked behavior)
-                float macroSmoothAmount = currentMacroSmoothParam * MACRO_SMOOTH_SCALE;
-                if (macroSmoothAmount > 0.0f) {
-                    if (macroProgress < macroSmoothAmount) {
-                        macroGain *= macroProgress / macroSmoothAmount;
-                    } else if (macroProgress > (1.0f - macroSmoothAmount)) {
-                        macroGain *= (1.0f - macroProgress) / macroSmoothAmount;
-                    }
+                // Apply macro smooth (Hann window envelope over entire event)
+                // 0.0 = no Hann (bypass), 1.0 = full Hann window applied
+                if (currentMacroSmoothParam > 0.01f) {
+                    // Calculate Hann window gain: 0 → 1 → 0 across event
+                    float hannGain = calculateHannWindow(macroProgress);
+                    // Blend between original envelope (no smooth) and Hann-windowed envelope (full smooth)
+                    macroGain *= (1.0f - currentMacroSmoothParam) + (currentMacroSmoothParam * hannGain);
                 }
 
                 if (macroEnvelopeCounter <= effectiveMacroLength) {
@@ -1354,7 +1396,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                             if (loopPos >= (loopLen - crossfadeLen)) {
                                 // In crossfade region (end of loop)
                                 int tailOffset = loopPos - (loopLen - crossfadeLen);
-                                float fadeOutGain = 1.0f - ((float)tailOffset / (float)crossfadeLen);
+                                // Add 1 to tailOffset so fadeInGain reaches exactly 1.0 at boundary (prevents jump)
+                                float fadeOutGain = 1.0f - ((float)(tailOffset + 1) / (float)crossfadeLen);
                                 float fadeInGain = 1.0f - fadeOutGain;
 
                                 // Read head sample from BEFORE stutter buffer (leads to start of repeat)
@@ -1379,18 +1422,30 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                                             tailEnvelopeGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
                                         }
                                     }
+
+                                    // Apply Hann windowing to tail envelope
+                                    if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
+                                        float tailHannGain = calculateHannWindow(tailProgress);
+                                        tailEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * tailHannGain);
+                                    }
                                 }
 
                                 // Head envelope (audio before stutter - use beginning envelope)
-                                // This audio "leads to" position 0, so calculate as if at beginning
-                                int headLoopPos = tailOffset;  // Maps to 0..crossfadeLen-1
+                                // Count down to 0 at boundary to match first sample of next cycle
+                                int headLoopPos = crossfadeLen - 1 - tailOffset;  // Counts down: (crossfadeLen-1) → 0
                                 float headEnvelopeGain = 0.0f;
                                 if (headLoopPos < heldNanoEnvelopeLengthInSamples) {
                                     float headProgress = (float)headLoopPos / (float)heldNanoEnvelopeLengthInSamples;
                                     headEnvelopeGain = calculateEnvelopeGain(headProgress, currentNanoShapeParam);
+
+                                    // Apply Hann windowing to head envelope
+                                    if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
+                                        float headHannGain = calculateHannWindow(headProgress);
+                                        headEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * headHannGain);
+                                    }
                                 }
 
-                                // Apply envelope gains to raw samples, then crossfade
+                                // Crossfade between enveloped samples (both edges at zero when Hann at max)
                                 processedSample = (processedSample * tailEnvelopeGain) * fadeOutGain +
                                                  (headSample * headEnvelopeGain) * fadeInGain;
                                 crossfadeWasApplied = true;
@@ -1400,7 +1455,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                         else if (!isFirstReverseCycle) {
                             if (loopPos < crossfadeLen) {
                                 // In crossfade region (beginning of loopPos in reverse)
-                                float fadeInGain = (float)loopPos / (float)crossfadeLen;
+                                // Add 1 to loopPos so fadeInGain reaches exactly 1.0 at boundary (prevents jump)
+                                float fadeInGain = (float)(loopPos + 1) / (float)crossfadeLen;
                                 float fadeOutGain = 1.0f - fadeInGain;
 
                                 // Read tail sample (end of previous cycle in reverse playback)
@@ -1411,10 +1467,12 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                                 // Calculate envelope gains for both positions
                                 // Head envelope (current position at start of new cycle)
+                                // Add +1 offset to match post-crossfade position
                                 int gateStartPos = loopLen - heldNanoEnvelopeLengthInSamples;
                                 float headEnvelopeGain = 0.0f;
-                                if (loopPos >= gateStartPos) {
-                                    int positionInGatedRegion = loopPos - gateStartPos;
+                                int headLoopPosForEnvelope = loopPos + 1;  // Match post-crossfade position
+                                if (headLoopPosForEnvelope >= gateStartPos) {
+                                    int positionInGatedRegion = headLoopPosForEnvelope - gateStartPos;
                                     float headProgress = 1.0f - ((float)positionInGatedRegion / (float)heldNanoEnvelopeLengthInSamples);
                                     headEnvelopeGain = calculateEnvelopeGain(headProgress, currentNanoShapeParam);
 
@@ -1422,17 +1480,23 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                                     if (smoothHeldNanoGate < 1.0f) {
                                         int fadeOutLen = static_cast<int>(sampleRate * NANO_FADE_OUT_SECONDS);
                                         int fadeOutStart = std::max(gateStartPos, loopLen - fadeOutLen);
-                                        if (loopPos >= fadeOutStart && fadeOutLen > 0) {
-                                            float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(loopPos - fadeOutStart) / (float)fadeOutLen);
+                                        if (headLoopPosForEnvelope >= fadeOutStart && fadeOutLen > 0) {
+                                            float fadeOutProgress = juce::jlimit(0.0f, 1.0f, (float)(headLoopPosForEnvelope - fadeOutStart) / (float)fadeOutLen);
                                             headEnvelopeGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
                                         }
+                                    }
+
+                                    // Apply Hann windowing to head envelope
+                                    if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
+                                        float headHannGain = calculateHannWindow(headProgress);
+                                        headEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * headHannGain);
                                     }
                                 }
 
                                 // Tail envelope (end of previous cycle in reverse)
-                                // Previous cycle ended with loopPos near loopLen, which had low envelope gain
+                                // Read from actual end of previous cycle backwards
                                 float tailEnvelopeGain = 0.0f;
-                                int tailLoopPos = loopLen - crossfadeLen + loopPos;
+                                int tailLoopPos = loopLen - 1 - loopPos;  // Count down from end: 2399→1920
                                 if (tailLoopPos >= gateStartPos) {
                                     int tailPosInGatedRegion = tailLoopPos - gateStartPos;
                                     float tailProgress = 1.0f - ((float)tailPosInGatedRegion / (float)heldNanoEnvelopeLengthInSamples);
@@ -1447,9 +1511,15 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                                             tailEnvelopeGain *= juce::jlimit(0.0f, 1.0f, 1.0f - fadeOutProgress);
                                         }
                                     }
+
+                                    // Apply Hann windowing to tail envelope
+                                    if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
+                                        float tailHannGain = calculateHannWindow(tailProgress);
+                                        tailEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * tailHannGain);
+                                    }
                                 }
 
-                                // Apply envelope gains to raw samples, then crossfade
+                                // Crossfade between enveloped samples (both edges at zero when Hann at max)
                                 processedSample = (processedSample * headEnvelopeGain) * fadeInGain +
                                                  (tailSample * tailEnvelopeGain) * fadeOutGain;
                                 crossfadeWasApplied = true;
@@ -1460,11 +1530,13 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                 // Position A: Apply EMA before nano envelope (if selected)
                 if constexpr (NANO_EMA_POSITION == EmaPosition::BeforeNanoEnvelope) {
-                    if (shouldResetEmaState) {
+                    if (currentNanoEmaParam > 0.0f) {  // Only apply EMA if parameter > 0
+                        if (shouldResetEmaState) {
+                            nanoEmaState[ch] = processedSample;
+                        }
+                        processedSample = currentNanoEmaAlpha * processedSample + (1.0f - currentNanoEmaAlpha) * nanoEmaState[ch];
                         nanoEmaState[ch] = processedSample;
                     }
-                    processedSample = currentNanoEmaAlpha * processedSample + (1.0f - currentNanoEmaAlpha) * nanoEmaState[ch];
-                    nanoEmaState[ch] = processedSample;
                 }
 
                 // Apply nano envelope (skip if already applied in crossfade)
@@ -1475,22 +1547,26 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                 // Position B: Apply EMA after nano envelope, before macro envelope (if selected)
                 if constexpr (NANO_EMA_POSITION == EmaPosition::AfterNanoEnvelope) {
-                    if (shouldResetEmaState) {
+                    if (currentNanoEmaParam > 0.0f) {  // Only apply EMA if parameter > 0
+                        if (shouldResetEmaState) {
+                            nanoEmaState[ch] = processedSample;
+                        }
+                        processedSample = currentNanoEmaAlpha * processedSample + (1.0f - currentNanoEmaAlpha) * nanoEmaState[ch];
                         nanoEmaState[ch] = processedSample;
                     }
-                    processedSample = currentNanoEmaAlpha * processedSample + (1.0f - currentNanoEmaAlpha) * nanoEmaState[ch];
-                    nanoEmaState[ch] = processedSample;
                 }
 
                 processedSample *= macroGain; // Apply macro envelope
 
                 // Position C: Apply EMA after macro envelope (if selected)
                 if constexpr (NANO_EMA_POSITION == EmaPosition::AfterMacroEnvelope) {
-                    if (shouldResetEmaState) {
+                    if (currentNanoEmaParam > 0.0f) {  // Only apply EMA if parameter > 0
+                        if (shouldResetEmaState) {
+                            nanoEmaState[ch] = processedSample;
+                        }
+                        processedSample = currentNanoEmaAlpha * processedSample + (1.0f - currentNanoEmaAlpha) * nanoEmaState[ch];
                         nanoEmaState[ch] = processedSample;
                     }
-                    processedSample = currentNanoEmaAlpha * processedSample + (1.0f - currentNanoEmaAlpha) * nanoEmaState[ch];
-                    nanoEmaState[ch] = processedSample;
                 }
 
                 wetSample = processedSample;
@@ -1500,14 +1576,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             // Apply conditional EMA filtering to dry signal during crossfades to eliminate clicks
             float fadedDrySample;
 
-            if (isFadingStutterToStutter && currentNanoSmoothParam > 0.0f) {
+            if (isFadingStutterToStutter && currentNanoEmaParam > 0.0f) {
                 // Stutter→Stutter: Apply full EMA to dry using current alpha
                 float filteredDry = currentNanoEmaAlpha * drySample
                     + (1.0f - currentNanoEmaAlpha) * dryEmaStateForFade[ch];
                 dryEmaStateForFade[ch] = filteredDry;
                 fadedDrySample = filteredDry * currentDryGain;
 
-            } else if (isFadingDryToStutter && currentNanoSmoothParam > 0.0f) {
+            } else if (isFadingDryToStutter && currentNanoEmaParam > 0.0f) {
                 // Dry→Stutter: Gradually introduce EMA (alpha ramps from 1.0 → currentNanoEmaAlpha)
                 float rampedAlpha = 1.0f - ((1.0f - currentNanoEmaAlpha) * dryFadeProgress);
                 float filteredDry = rampedAlpha * drySample
@@ -1832,7 +1908,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGate", 1), "Nano Gate", 0.0f, 1.0f, 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShape", 1), "Nano Shape", 0.0f, 1.0f, 0.5f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoSmooth", 1), "Nano Smooth", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoSmooth", 1), "Nano Smooth", 0.0f, 1.0f, 0.0f));  // Hann window smoothing
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoEmaFilter", 1), "EMA Filter", 0.0f, 1.0f, 0.0f));  // EMA damping filter
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("CycleCrossfade", 1), "Cycle Crossfade", 0.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGateRandom", 1), "Nano Gate Random", -1.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShapeRandom", 1), "Nano Shape Random", -1.0f, 1.0f, 0.0f));

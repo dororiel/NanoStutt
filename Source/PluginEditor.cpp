@@ -59,7 +59,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     {
         addAndMakeVisible(slider);
         slider.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
+        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 16);  // Reduced textbox height from 20 to 16
         attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(audioProcessor.getParameters(), paramID, slider);
     };
 
@@ -182,8 +182,11 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
             param->setValueNotifyingHost(isBipolar ? 1.0f : 0.0f);
     };
 
-    // NanoSmooth remains a regular slider (no randomization)
+    // NanoSmooth - Hann window smoothing (regular slider, no randomization)
     setupKnob(nanoSmoothSlider, "NanoSmooth", nanoSmoothAttachment);
+
+    // NanoEma - EMA filter (regular slider, no randomization)
+    setupKnob(nanoEmaSlider, "NanoEmaFilter", nanoEmaAttachment);
 
     // CycleCrossfade (regular slider for cycle boundary smoothing)
     setupKnob(nanoCycleCrossfadeSlider, "CycleCrossfade", nanoCycleCrossfadeAttachment);
@@ -282,6 +285,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     setupLabel(nanoShapeLabel, "Shape", nanoShapeDualSlider);
     setupLabel(nanoOctaveLabel, "Oct", nanoOctaveDualSlider);
     setupLabel(nanoSmoothLabel, "Smooth", nanoSmoothSlider);
+    setupLabel(nanoEmaLabel, "EMA", nanoEmaSlider);
     setupLabel(nanoCycleCrossfadeLabel, "Xfade", nanoCycleCrossfadeSlider);
     setupLabel(macroGateLabel, "Gate", macroGateDualSlider);
     setupLabel(macroShapeLabel, "Shape", macroShapeDualSlider);
@@ -294,6 +298,10 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     macroControlsLabel.setText("Macro Envelope", juce::dontSendNotification);
     macroControlsLabel.setJustificationType(juce::Justification::centred);
     addAndMakeVisible(macroControlsLabel);
+
+    dampingLabel.setText("Damping", juce::dontSendNotification);
+    dampingLabel.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(dampingLabel);
 
     // === Section Labels ===
     repeatRatesLabel.setText("Repeat Rates", juce::dontSendNotification);
@@ -814,24 +822,29 @@ void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> 
 
     Grid envelopeGrid;
     envelopeGrid.templateRows = {
-        Track(Px(18)), Track(Px(60)), Track(Px(60)), Track(Px(2)), // Macro section with less spacing
-        Track(Px(18)), Track(Px(60)), Track(Px(60))  // Nano section (back to 2 rows)
+        Track(Px(20)), Track(Px(58)), Track(Px(58)), // Macro: label, knobs
+        Track(Px(20)), Track(Px(58)), Track(Px(58)), // Nano: label, knobs
+        Track(Px(20)), Track(Px(58))  // Damping: label, knobs
     };
     envelopeGrid.templateColumns = { Track(Fr(1)), Track(Fr(1)) }; // 2 equal columns
     envelopeGrid.columnGap = Px(8);
-    envelopeGrid.rowGap = Px(15);
+    envelopeGrid.rowGap = Px(12);  // Gap between rows to fit all sections
 
     envelopeGrid.items = {
+        // Macro Envelope section
         GridItem(macroControlsLabel).withArea(1, 1, 1, 3),
         GridItem(macroGateDualSlider).withArea(2, 1),
         GridItem(macroShapeDualSlider).withArea(2, 2),
         GridItem(macroSmoothSlider).withArea(3, 1, 3, 3),
-        GridItem(),
-        GridItem(nanoControlsLabel).withArea(5, 1, 5, 3),
-        GridItem(nanoGateDualSlider).withArea(6, 1),
-        GridItem(nanoShapeDualSlider).withArea(6, 2),
-        GridItem(nanoSmoothSlider).withArea(7, 1),
-        GridItem(nanoCycleCrossfadeSlider).withArea(7, 2)
+        // Nano Envelope section
+        GridItem(nanoControlsLabel).withArea(4, 1, 4, 3),
+        GridItem(nanoGateDualSlider).withArea(5, 1),
+        GridItem(nanoShapeDualSlider).withArea(5, 2),
+        GridItem(nanoSmoothSlider).withArea(6, 1, 6, 3),
+        // Damping section
+        GridItem(dampingLabel).withArea(7, 1, 7, 3),
+        GridItem(nanoEmaSlider).withArea(8, 1),
+        GridItem(nanoCycleCrossfadeSlider).withArea(8, 2)
     };
     envelopeGrid.performLayout(bounds);
 }
@@ -1280,8 +1293,8 @@ void NanoStuttAudioProcessorEditor::resized()
     const int spacing = 10;
     const int buttonColumnSpacing = 8;
     const int visualizerHeight = 70;
-    const int tunerHeight = 28;
-    const int tunerGap = 8;
+    const int tunerHeight = 22;  // Match nano preset dropdown height
+    const int tunerGap = 2;  // Very small gap to position tuner close to visualizer
 
     auto leftBounds = juce::Rectangle<int>(
         contentBounds.getX(),
@@ -1320,10 +1333,10 @@ void NanoStuttAudioProcessorEditor::resized()
 
     // Call layout helper methods
     // Split left bounds into envelope controls and tuner
-    auto envelopeControlsBounds = leftBounds.withTrimmedBottom(tunerHeight + tunerGap + spacing);
+    auto envelopeControlsBounds = leftBounds.withTrimmedBottom(tunerHeight + tunerGap + tunerGap);
     auto tunerBounds = juce::Rectangle<int>(
         leftBounds.getX(),
-        leftBounds.getBottom() - tunerHeight - spacing,
+        leftBounds.getBottom() - tunerHeight - tunerGap,  // Use tunerGap instead of spacing for closer positioning
         leftWidth,
         tunerHeight
     );

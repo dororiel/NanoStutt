@@ -228,13 +228,14 @@ public:
     DualSlider nanoGateDualSlider;
     DualSlider nanoShapeDualSlider;
     DualSlider nanoOctaveDualSlider;
-    juce::Slider nanoSmoothSlider;
-    juce::Slider nanoCycleCrossfadeSlider;
+    juce::Slider nanoSmoothSlider;           // Hann window smoothing (Nano Envelope section)
+    juce::Slider nanoEmaSlider;              // EMA filter (Damping section)
+    juce::Slider nanoCycleCrossfadeSlider;   // Cycle crossfade (Damping section)
     DualSlider macroGateDualSlider, macroShapeDualSlider;
     juce::Slider macroSmoothSlider;
     juce::Slider timingOffsetSlider;
 
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateAttachment, nanoShapeAttachment, nanoSmoothAttachment, nanoCycleCrossfadeAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateAttachment, nanoShapeAttachment, nanoSmoothAttachment, nanoEmaAttachment, nanoCycleCrossfadeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateRandomAttachment, nanoShapeRandomAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoOctaveAttachment, nanoOctaveRandomAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateAttachment, macroShapeAttachment, macroSmoothAttachment;
@@ -274,9 +275,9 @@ public:
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> quantActiveAttachments;
 
     juce::Label chanceLabel, reverseLabel, quantLabel;
-    juce::Label nanoGateLabel, nanoShapeLabel, nanoOctaveLabel, nanoSmoothLabel, nanoCycleCrossfadeLabel;
+    juce::Label nanoGateLabel, nanoShapeLabel, nanoOctaveLabel, nanoSmoothLabel, nanoEmaLabel, nanoCycleCrossfadeLabel;
     juce::Label macroGateLabel, macroShapeLabel, macroSmoothLabel;
-    juce::Label nanoControlsLabel, macroControlsLabel;
+    juce::Label nanoControlsLabel, macroControlsLabel, dampingLabel;
 
     // Section labels for slider groups
     juce::Label repeatRatesLabel, nanoRatesLabel, quantizationLabel;

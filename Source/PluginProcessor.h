@@ -103,8 +103,7 @@ private:
     static constexpr float NANO_GATE_MIN = 0.25f;
     static constexpr float NANO_GATE_RANGE = 0.75f;
     static constexpr float MACRO_GATE_MIN = 0.25f;
-    static constexpr float MACRO_SMOOTH_SCALE = 0.3f;
-    static constexpr float NANO_SMOOTH_SCALE = 0.25f;
+    // NOTE: Hann window smoothing now uses 0.0-1.0 range directly (no scaling)
 
     // EMA Filter Constants
     static constexpr float NANO_EMA_MIN_ALPHA = 0.05f;  // Maximum smoothing (at knob=1.0)
@@ -184,7 +183,8 @@ private:
     float currentMacroSmoothParam = 0.0f;
     float currentNanoGateParam = 1.0f;
     float currentNanoShapeParam = 0.5f;
-    float currentNanoSmoothParam = 0.0f;
+    float currentNanoSmoothParam = 0.0f;      // Hann window smoothing per-cycle
+    float currentNanoEmaParam = 0.0f;         // EMA filter (formerly NanoSmooth)
     float currentNanoOctaveParam = 0.0f;
 
     // Next event parameters - sampled 2ms before event end for upcoming event
@@ -193,7 +193,8 @@ private:
     float nextMacroSmoothParam = 0.0f;
     float nextNanoGateParam = 1.0f;
     float nextNanoShapeParam = 0.5f;
-    float nextNanoSmoothParam = 0.0f;
+    float nextNanoSmoothParam = 0.0f;         // Hann window smoothing per-cycle
+    float nextNanoEmaParam = 0.0f;            // EMA filter (formerly NanoSmooth)
     float nextNanoOctaveParam = 0.0f;
 
     // Held random offsets for nano parameters (calculated once per event, added to per-cycle values)
@@ -223,7 +224,7 @@ private:
     int stopFadeChosenDenominator = 1;
     // EMA filter state snapshot for stop fade continuation
     std::vector<float> stopFadeEmaState;
-    float stopFadeNanoSmoothParam = 0.0f;
+    float stopFadeNanoEmaParam = 0.0f;      // EMA filter (formerly NanoSmooth)
 
     // Loop boundary handling - prevent clicks at first sample after jump
     bool skipFadeOnNextSample = false;
@@ -243,7 +244,8 @@ private:
     // Smoothed envelope parameters (0.3ms ramp time for fast response, prevents bleeding across events)
     juce::LinearSmoothedValue<float> smoothedNanoGate;
     juce::LinearSmoothedValue<float> smoothedNanoShape;
-    juce::LinearSmoothedValue<float> smoothedNanoSmooth;
+    juce::LinearSmoothedValue<float> smoothedNanoSmooth;      // Hann window smoothing
+    juce::LinearSmoothedValue<float> smoothedNanoEma;         // EMA filter (formerly NanoSmooth)
     juce::LinearSmoothedValue<float> smoothedMacroGate;
     juce::LinearSmoothedValue<float> smoothedMacroShape;
     juce::LinearSmoothedValue<float> smoothedMacroSmooth;
@@ -338,6 +340,14 @@ private:
             ? std::pow(1.0f - progress, exponent)
             : std::pow(progress, exponent);
         return juce::jmap(curveAmount, 0.0f, 1.0f, 1.0f, curvedGain);
+    }
+
+    // Hann window calculation utility
+    // Produces a smooth S-curve from 0 → 1 → 0 across progress [0,1]
+    // Formula: 0.5 * (1 - cos(2π × progress))
+    static inline float calculateHannWindow(float progress)
+    {
+        return 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi * progress));
     }
 
     // JUCE DSP ProcessorChain for waveshaping
