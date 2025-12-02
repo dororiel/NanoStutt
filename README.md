@@ -18,7 +18,8 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 
 ### 3. **Pre-emptive Fade System**
 - **Mid-point Decision Strategy**: Auto-stutter decisions are made at the middle of quantization intervals
-- **1ms Crossfades**: Pre-emptive crossfades eliminate clicks at event boundaries
+- **User-Controllable Fade Length**: Adjustable crossfade duration (0.0001ms to 30ms, default: 1.0ms)
+- **Dynamic Parameter Sampling**: Timing adapts to fade length to prevent mid-fade jumps
 - **Sample-accurate Timing**: All fade transitions are precisely timed to avoid artifacts
 
 ### 4. **Dual Envelope Architecture**
@@ -68,7 +69,11 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
   - Snap state saved in presets for consistent behavior across sessions
 - **Nano Shape**: Loop envelope curve (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
 - **Nano Octave**: Octave offset control (-1 to +3, integer steps) with randomization (±4 octaves) for pitch shifting effects
-- **Nano Smooth**: Hann window envelope smoothing (0.0-1.0) applied per repeat cycle - at 0.0 no smoothing, at 1.0 full Hann window applied to gated portion of envelope
+- **Nano Smooth**: Multi-window envelope smoothing (0.0-1.0) applied per repeat cycle with selectable window types:
+  - **Fixed Windows** (blended by intensity): None, Hann, Hamming, Blackman, Blackman-Harris, Bartlett
+  - **Adjustable Windows** (intensity controls shape): Kaiser, Tukey, Gaussian, Planck, Exponential
+  - At 0.0 = no smoothing, at 1.0 = full window applied to gated portion of envelope
+  - Window type selection available in advanced view (Advanced View → Window Type dropdown)
 
 #### Macro Envelope (Event-level Control)
 - **Macro Gate**: Overall event duration (0.25-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
@@ -76,7 +81,9 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
   - Snap mode quantizes gate values and randomization to quarter increments (0.25, 0.5, 0.75, 1.0)
   - Snap state saved in presets for consistent behavior across sessions
 - **Macro Shape**: Event envelope curve (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
-- **Macro Smooth**: Hann window envelope smoothing (0.0-1.0) applied to entire stutter event - at 0.0 no smoothing, at 1.0 full Hann window applied
+- **Macro Smooth**: Multi-window envelope smoothing (0.0-1.0) applied to entire stutter event
+  - Uses same window type as Nano Smooth (set in advanced view)
+  - Fixed windows blend from no smoothing to full window; adjustable windows use intensity to control window shape
 
 #### Damping Section
 - **EMA Filter**: Exponential moving average low-pass filter (0.0-1.0) - alpha coefficient mapping (0.0 = bypass, 1.0 = maximum smoothing)
@@ -93,7 +100,8 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 
 ### Audio Processing
 - **Waveshaping**: Built-in waveshaping with multiple algorithms (None, Soft Clip, Tanh, Hard Clip, Tube, Fold)
-- **Drive**: Input gain control for waveshaping intensity (0.0-1.0, bypassed at 0)
+- **Drive**: Input gain control for waveshaping intensity (0.0-1.0, maps to 1.0x-10.0x)
+  - Waveshaper processes audio at all drive levels (including 0) unless "None" algorithm is selected
 - **Gain Compensation**: Optional output compensation to maintain consistent volume levels (default: off)
 
 ### User Interface
@@ -117,6 +125,11 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 
 ### Timing Controls
 - **Timing Offset**: Manual timing offset parameter (-100ms to +100ms) for master track delay compensation in Ableton Live
+- **Fade Length** (Advanced View): User-controllable crossfade duration (0.0001ms to 30ms, default: 1.0ms)
+  - Located in left panel under window type combobox
+  - Affects all crossfades: dry→wet, wet→dry, stutter→stutter transitions
+  - Parameter sampling automatically adjusts timing to prevent mid-fade jumps
+  - Logarithmic scale for precision at low values
 
 ### Reverse Playback System
 - **Intelligent Reverse Logic**: When reverse is triggered, the first repeat cycle plays forward, then subsequent cycles play in reverse
@@ -134,7 +147,10 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
 - **Host Sync**: Automatic synchronization to DAW tempo and timing
 
 ### Fade System Implementation
-- **Pre-emptive Fades**: 1ms crossfades scheduled before event boundaries
+- **User-Controllable Fade Length**: Adjustable crossfade duration (0.0001ms to 30ms, default: 1.0ms)
+- **Pre-emptive Fades**: Crossfades scheduled before event boundaries to eliminate clicks
+- **Dynamic Parameter Sampling**: Timing adjusts to `(fade_length + 1ms)` before events to prevent mid-fade jumps
+- **Real-Time Updates**: Fade length recalculated every audio block for immediate response to parameter changes
 - **Multiple Fade Types**:
   - Dry to Wet (stutter event start)
   - Wet to Dry (stutter event end)
@@ -195,6 +211,29 @@ make -j4
 - Manual stutter buttons may need GUI integration
 
 ### Recent Improvements
+- **User-Controllable Fade Length and Dynamic Parameter Sampling** - replaced hardcoded fade timing with adjustable parameter
+  - Added FadeLength parameter (0.0001ms to 30ms, default: 1.0ms) with logarithmic scale
+  - Removed hardcoded FADE_DURATION_MS and PARAMETER_SAMPLE_ADVANCE_MS constants
+  - fadeLengthInSamples recalculated every audio block for real-time response to parameter changes
+  - Parameter sampling timing now dynamic: `(fade_length + 1ms)` before event start
+  - Prevents mid-fade jumps when fade length exceeds old 2ms fixed sampling advance
+  - UI control: horizontal slider in advanced view (left panel, under window type)
+  - Affects all crossfades: dry→wet, wet→dry, stutter→stutter transitions
+- **Waveshaper Bypass Fix** - corrected bypass logic to only check algorithm selection
+  - Changed from `driveAmount > 0.0f && waveshapeAlgorithm > 0` to `waveshapeAlgorithm > 0`
+  - Waveshaper now processes audio at all drive levels unless "None" algorithm is selected
+  - Drive parameter correctly controls saturation intensity without affecting bypass state
+- **Multi-Window System for Envelope Smoothing** - expanded from single Hann window to 11 window types
+  - Fixed Windows (blended by intensity): None, Hann, Hamming, Blackman, Blackman-Harris, Bartlett
+  - Adjustable Windows (intensity controls shape parameters): Kaiser, Tukey, Gaussian, Planck, Exponential
+  - calculateWindowGain() replaces calculateHannWindow() with comprehensive window function library
+  - Fixed windows blend from bypass to full window effect; adjustable windows use intensity as shape parameter
+  - Window type selection in advanced view applies to both Nano Smooth and Macro Smooth
+  - Backward compatible: Hann window (default) maintains existing behavior
+- **Nano Rate Tracking Enhancements** - improved UI state tracking for visual feedback
+  - Added currentPlayingNanoRateIndex atomic (-1 = not playing, 0-11 = active nano rate)
+  - Enables per-rate visual indicators in UI for showing which nano rate is currently active
+  - Thread-safe lock-free communication between audio and UI threads
 - **Refactored Smoothing System with Hann Windowing** - separated EMA filtering from envelope smoothing
   - Renamed "Nano Smooth" → "EMA Filter" and moved to new "Damping" section with Cycle Crossfade
   - Implemented NEW "Nano Smooth" using true Hann window (0.5 * (1 - cos(2π × progress)))
