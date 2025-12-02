@@ -13,9 +13,40 @@
 #include <vector>     // for std::vector
 
 //==============================================================================
+// Helper function to recursively tint all shapes in a Drawable
+namespace
+{
+    void tintDrawable(juce::Drawable* drawable, juce::Colour tintColour)
+    {
+        if (drawable == nullptr)
+            return;
+
+        // Handle DrawableComposite (SVG with multiple child elements)
+        if (auto* composite = dynamic_cast<juce::DrawableComposite*>(drawable))
+        {
+            for (int i = 0; i < composite->getNumChildComponents(); ++i)
+            {
+                if (auto* child = dynamic_cast<juce::Drawable*>(composite->getChildComponent(i)))
+                    tintDrawable(child, tintColour);
+            }
+        }
+        // Handle individual DrawableShape elements
+        else if (auto* shape = dynamic_cast<juce::DrawableShape*>(drawable))
+        {
+            // Only tint if the shape has a visible fill
+            if (!shape->getFill().isInvisible())
+                shape->setFill(juce::FillType(tintColour));
+        }
+    }
+}
+
+//==============================================================================
 NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProcessor& p)
 : AudioProcessorEditor (&p), autoStutterIndicator(p), visualizer(p), tuner(p), audioProcessor (p)
 {
+    // Apply modern LookAndFeel for futuristic/technical UI styling
+    setLookAndFeel(&modernLookAndFeel);
+
     // === Manual Stutter Button === //
     addAndMakeVisible(stutterButton);
     stutterButton.setButtonText("Stutter");
@@ -191,6 +222,14 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     // CycleCrossfade (regular slider for cycle boundary smoothing)
     setupKnob(nanoCycleCrossfadeSlider, "CycleCrossfade", nanoCycleCrossfadeAttachment);
 
+    // Fade Length slider (advanced view only - horizontal style like right section)
+    addAndMakeVisible(fadeLengthSlider);
+    fadeLengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    fadeLengthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    fadeLengthSlider.setVisible(false);  // Hidden by default
+    fadeLengthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "FadeLength", fadeLengthSlider);
+
     // Setup DualSliders for MacroGate and MacroShape with randomization
     addAndMakeVisible(macroGateDualSlider);
     macroGateDualSlider.setDefaultValues(1.0, 0.0);  // MacroGate default: 1.0, Random default: 0.0
@@ -306,16 +345,17 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     // === Section Labels ===
     repeatRatesLabel.setText("Repeat Rates", juce::dontSendNotification);
     repeatRatesLabel.setJustificationType(juce::Justification::centred);
-    repeatRatesLabel.setColour(juce::Label::textColourId, juce::Colour(0xffff9933)); // Orange
+    repeatRatesLabel.setColour(juce::Label::textColourId, ColorPalette::rhythmicOrange);
     addAndMakeVisible(repeatRatesLabel);
 
     nanoRatesLabel.setText("Nano Rates", juce::dontSendNotification);
     nanoRatesLabel.setJustificationType(juce::Justification::centred);
-    nanoRatesLabel.setColour(juce::Label::textColourId, juce::Colour(0xff9966ff)); // Purple
+    nanoRatesLabel.setColour(juce::Label::textColourId, ColorPalette::nanoPurple);
     addAndMakeVisible(nanoRatesLabel);
 
     quantizationLabel.setText("Quantization", juce::dontSendNotification);
     quantizationLabel.setJustificationType(juce::Justification::centred);
+    quantizationLabel.setColour(juce::Label::textColourId, ColorPalette::accentCyan);
     addAndMakeVisible(quantizationLabel);
     
     // === Rate Sliders and buttons ===
@@ -325,6 +365,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         auto* slider = new juce::Slider();
         slider->setSliderStyle(juce::Slider::LinearVertical);
         slider->setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        slider->setName("rate");  // Color-code with orange theme
         addAndMakeVisible(slider);
         rateProbSliders.add(slider);
 
@@ -358,6 +399,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         auto* slider = new juce::Slider();
         slider->setSliderStyle(juce::Slider::LinearVertical);
         slider->setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        slider->setName("quant");  // Color-code with cyan theme
         addAndMakeVisible(slider);
         quantProbSliders.add(slider);
 
@@ -480,6 +522,26 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
                            "Harmonic Minor", "Melodic Minor", "Whole Tone", "Diminished", "Custom" }, 1);
     scaleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         audioProcessor.getParameters(), "scale", scaleMenu);
+
+    // Window Type ComboBox (advanced view only)
+    windowTypeLabel = std::make_unique<juce::Label>("", "Window Type");
+    windowTypeLabel->setJustificationType(juce::Justification::centred);
+    windowTypeLabel->setVisible(false);  // Hidden by default
+    addAndMakeVisible(windowTypeLabel.get());
+
+    addAndMakeVisible(windowTypeMenu);
+    windowTypeMenu.addItemList({ "None", "Hann", "Hamming", "Blackman", "Blackman-Harris",
+                                  "Bartlett", "Kaiser", "Tukey", "Gaussian", "Planck", "Exponential" }, 1);
+    windowTypeMenu.setVisible(false);  // Hidden by default
+    windowTypeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getParameters(), "WindowType", windowTypeMenu);
+
+    // Fade Length label (advanced view only - attaches to slider)
+    fadeLengthLabel.setText("Fade Length", juce::dontSendNotification);
+    fadeLengthLabel.setJustificationType(juce::Justification::centred);
+    fadeLengthLabel.attachToComponent(&fadeLengthSlider, false);
+    fadeLengthLabel.setVisible(false);
+    addAndMakeVisible(fadeLengthLabel);
 
     // === Waveshaper Controls ===
     addAndMakeVisible(waveshaperAlgorithmMenu);
@@ -620,6 +682,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         auto* slider = new juce::Slider();
         slider->setSliderStyle(juce::Slider::LinearVertical);
         slider->setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        slider->setName("nano");  // Color-code with purple theme
         addAndMakeVisible(slider);
         nanoRateProbSliders.add(slider);
 
@@ -640,13 +703,94 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
             audioProcessor.getParameters(), activeParamId, *toggleButton));
     }
 
-    // === Nano Interval Labels (Roman Numerals) ===
-    auto intervalLabels = juce::StringArray { "I", "ii", "II", "iii", "III", "IV", "#iv", "V", "vi", "VI", "vii", "VII" };
+    // Lambda function to load SVG from BinaryData
+    auto loadSVGFromBinary = [](const char* svgData, const juce::String& name) -> std::unique_ptr<juce::Drawable>
+    {
+        if (auto svg = juce::parseXML(svgData))
+        {
+            // KEEP the viewBox and transform - they're essential for positioning!
+            // Just log that we loaded it
+            DBG("Loaded SVG XML for: " + name);
+
+            auto drawable = juce::Drawable::createFromSVG(*svg);
+            if (drawable != nullptr)
+            {
+                auto bounds = drawable->getDrawableBounds();
+                DBG("Successfully loaded SVG: " + name +
+                    " | Bounds: " + juce::String(bounds.getX()) + "," + juce::String(bounds.getY()) +
+                    " " + juce::String(bounds.getWidth()) + "x" + juce::String(bounds.getHeight()));
+                return drawable;
+            }
+            else
+            {
+                DBG("Failed to create drawable from SVG: " + name);
+            }
+        }
+        else
+        {
+            DBG("Failed to parse XML for embedded SVG: " + name);
+        }
+
+        return nullptr;
+    };
+
+    // === Load Roman Numeral SVG Graphics FIRST (before creating labels) ===
+    const char* svgDataArray[12] = {
+        BinaryData::IM_svg,       // Index 0: "I" (root) - Capital
+        BinaryData::ii_svg,       // Index 1: "ii" (minor 2nd) - Lowercase
+        BinaryData::IIM_svg,      // Index 2: "II" (Major 2nd) - Capital
+        BinaryData::iii_svg,      // Index 3: "iii" (minor 3rd) - Lowercase
+        BinaryData::IIIM_svg,     // Index 4: "III" (Major 3rd) - Capital
+        BinaryData::IVM_svg,      // Index 5: "IV" (Perfect 4th) - Capital
+        BinaryData::iv_svg,       // Index 6: "#iv" (Augmented 4th) - Lowercase
+        BinaryData::VM_svg,       // Index 7: "V" (Perfect 5th) - Capital
+        BinaryData::vi_svg,       // Index 8: "vi" (minor 6th) - Lowercase
+        BinaryData::VIM_svg,      // Index 9: "VI" (Major 6th) - Capital
+        BinaryData::vii_svg,      // Index 10: "vii" (minor 7th) - Lowercase
+        BinaryData::VIIM_svg      // Index 11: "VII" (Major 7th) - Capital
+    };
+
+    juce::StringArray svgNames = { "I", "ii", "IIM", "iii", "IIIM", "IVM", "iv", "V", "vi", "VIM", "vii", "VIIM" };
+
     for (int i = 0; i < 12; ++i)
     {
-        auto* label = new juce::Label();
-        label->setText(intervalLabels[i], juce::dontSendNotification);
-        label->setJustificationType(juce::Justification::centred);
+        nanoLabelSVGs[i] = loadSVGFromBinary(svgDataArray[i], svgNames[i]);
+
+        // Tint SVG to much brighter purple for visibility
+        if (nanoLabelSVGs[i] != nullptr)
+            tintDrawable(nanoLabelSVGs[i].get(), ColorPalette::nanoPurple.brighter(2.0f));
+    }
+
+    // === Nano Interval Labels (Roman Numeral SVGs) ===
+    // Array indicating which indices are capitals (ending in M) vs lowercase
+    // Indices: 0=IM, 1=ii, 2=IIM, 3=iii, 4=IIIM, 5=IVM, 6=iv, 7=VM, 8=vi, 9=VIM, 10=vii, 11=VIIM
+    bool isCapital[12] = { true, false, true, false, true, true, false, true, false, true, false, true };
+
+    for (int i = 0; i < 12; ++i)
+    {
+        auto* label = new RomanNumeralLabel();
+
+        // Clone SVG for this label (already tinted to brightened purple)
+        if (nanoLabelSVGs[i] != nullptr)
+        {
+            auto svgCopy = nanoLabelSVGs[i]->createCopy();
+            DBG("Setting SVG for label " + juce::String(i) + " | Copy created: " + (svgCopy != nullptr ? "YES" : "NO"));
+            label->setSVGDrawable(std::move(svgCopy));
+        }
+        else
+        {
+            DBG("WARNING: nanoLabelSVGs[" + juce::String(i) + "] is nullptr!");
+        }
+
+        // Purple border matching nano section
+        label->setBorderColour(ColorPalette::nanoPurple);
+
+        // Opaque dark background to block panel SVG bleed-through
+        label->setBackgroundFillColour(ColorPalette::mainBackground);
+
+        // Set vertical scale: capitals = 100% height, lowercase = 80% height
+        label->setVerticalScaleFactor(isCapital[i] ? 1.0f : 0.8f);
+
         addAndMakeVisible(label);
         nanoIntervalLabels.add(label);
     }
@@ -766,49 +910,158 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     setSize(1000, 570);
     setResizable(false, false);
 
+    // Load SVG panel backgrounds from embedded BinaryData
+    quantPanelSVG = loadSVGFromBinary(BinaryData::QuantPanel_svg, "QuantPanel");
+    rhythmicPanelSVG = loadSVGFromBinary(BinaryData::RhythemPanel_svg, "RhythemPanel");
+    nanoPanelSVG = loadSVGFromBinary(BinaryData::NanoPanel_svg, "NanoPanel");
+
     // Initialize tuning system UI
     updateNanoRatioUI();
 }
 
-
+//==============================================================================
 NanoStuttAudioProcessorEditor::~NanoStuttAudioProcessorEditor()
 {
+    // Clean up LookAndFeel before destruction
+    setLookAndFeel(nullptr);
+
     // unique_ptr handles cleanup automatically
 }
 
 //==============================================================================
 void NanoStuttAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    // (Our component is opaque, so we must completely fill the background with a solid colour)
-    g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
+    // Fill with modern dark background
+    g.fillAll (ColorPalette::mainBackground);
 
-    g.setColour (juce::Colours::white);
-    g.setFont (juce::FontOptions (15.0f));
-    //g.drawFittedText ("Hello World!", getLocalBounds(), juce::Justification::centred, 1);
+    // Draw colored backgrounds and borders around slider sections with modern styling
+    // Cyan section for quantization sliders
+    if (!quantizationSlidersBounds.isEmpty())
+    {
+        auto quantBounds = quantizationSlidersBounds.toFloat();
 
-    // Draw colored backgrounds and borders around slider sections
-    // Orange section for regular rate sliders
+        // SVG panel background with color tint
+        if (quantPanelSVG != nullptr)
+        {
+            auto tintedSVG = quantPanelSVG->createCopy();
+            tintDrawable(tintedSVG.get(), ColorPalette::accentCyan.withAlpha(0.85f));
+
+            if (showAdvancedView)
+            {
+                // Advanced: Stretch to fit panel exactly
+                tintedSVG->drawWithin(g, quantBounds,
+                                      juce::RectanglePlacement::stretchToFit,
+                                      1.0f);
+            }
+            else
+            {
+                // Simple: Bottom-aligned, clip top, NO scaling
+                // Use clipping to prevent SVG from overflowing panel bounds
+                g.saveState();
+                g.reduceClipRegion(quantBounds.toNearestInt());
+
+                tintedSVG->drawWithin(g, quantBounds,
+                                      juce::RectanglePlacement::xMid |
+                                      juce::RectanglePlacement::yBottom |
+                                      juce::RectanglePlacement::fillDestination,
+                                      1.0f);
+
+                g.restoreState();
+            }
+        }
+
+        // Glowing border
+        juce::Path borderPath;
+        borderPath.addRectangle(quantBounds);
+        GlowEffect::drawStrokeWithGlow(g, borderPath,
+                                        ColorPalette::accentCyan, 2.0f,
+                                        ColorPalette::accentGlow, 4.0f);
+    }
+
+    // Orange section for rhythmic/regular rate sliders
     if (!rhythmicSlidersBounds.isEmpty())
     {
-        // Draw semi-transparent fill first
-        g.setColour(juce::Colour(0xffff9933).withAlpha(0.08f));
-        g.fillRect(rhythmicSlidersBounds.toFloat());
+        auto rhythmicBounds = rhythmicSlidersBounds.toFloat();
 
-        // Draw border on top
-        g.setColour(juce::Colour(0xffff9933));  // Orange (matches regular stutter indicator)
-        g.drawRect(rhythmicSlidersBounds.toFloat(), 2.0f);
+        // SVG panel background with color tint
+        if (rhythmicPanelSVG != nullptr)
+        {
+            auto tintedSVG = rhythmicPanelSVG->createCopy();
+            tintDrawable(tintedSVG.get(), ColorPalette::rhythmicOrange.withAlpha(0.85f));
+
+            if (showAdvancedView)
+            {
+                // Advanced: Stretch to fit panel exactly
+                tintedSVG->drawWithin(g, rhythmicBounds,
+                                      juce::RectanglePlacement::stretchToFit,
+                                      1.0f);
+            }
+            else
+            {
+                // Simple: Bottom-aligned, clip top, NO scaling
+                // Use clipping to prevent SVG from overflowing panel bounds
+                g.saveState();
+                g.reduceClipRegion(rhythmicBounds.toNearestInt());
+
+                tintedSVG->drawWithin(g, rhythmicBounds,
+                                      juce::RectanglePlacement::xMid |
+                                      juce::RectanglePlacement::yBottom |
+                                      juce::RectanglePlacement::fillDestination,
+                                      1.0f);
+
+                g.restoreState();
+            }
+        }
+
+        // Glowing border
+        juce::Path borderPath;
+        borderPath.addRectangle(rhythmicBounds);
+        GlowEffect::drawStrokeWithGlow(g, borderPath,
+                                        ColorPalette::rhythmicOrange, 2.0f,
+                                        ColorPalette::rhythmicGlow, 4.0f);
     }
 
     // Purple section for nano sliders
     if (!nanoSlidersBounds.isEmpty())
     {
-        // Draw semi-transparent fill first
-        g.setColour(juce::Colour(0xff9966ff).withAlpha(0.08f));
-        g.fillRect(nanoSlidersBounds.toFloat());
+        auto nanoBounds = nanoSlidersBounds.toFloat();
 
-        // Draw border on top
-        g.setColour(juce::Colour(0xff9966ff));  // Purple (matches nano stutter indicator)
-        g.drawRect(nanoSlidersBounds.toFloat(), 2.0f);
+        // SVG panel background with color tint
+        if (nanoPanelSVG != nullptr)
+        {
+            auto tintedSVG = nanoPanelSVG->createCopy();
+            tintDrawable(tintedSVG.get(), ColorPalette::nanoPurple.withAlpha(0.85f));
+
+            if (showAdvancedView)
+            {
+                // Advanced: Stretch to fit panel exactly
+                tintedSVG->drawWithin(g, nanoBounds,
+                                      juce::RectanglePlacement::stretchToFit,
+                                      1.0f);
+            }
+            else
+            {
+                // Simple: Bottom-aligned, clip top, NO scaling
+                // Use clipping to prevent SVG from overflowing panel bounds
+                g.saveState();
+                g.reduceClipRegion(nanoBounds.toNearestInt());
+
+                tintedSVG->drawWithin(g, nanoBounds,
+                                      juce::RectanglePlacement::xMid |
+                                      juce::RectanglePlacement::yBottom |
+                                      juce::RectanglePlacement::fillDestination,
+                                      1.0f);
+
+                g.restoreState();
+            }
+        }
+
+        // Glowing border
+        juce::Path borderPath;
+        borderPath.addRectangle(nanoBounds);
+        GlowEffect::drawStrokeWithGlow(g, borderPath,
+                                        ColorPalette::nanoPurple, 2.0f,
+                                        ColorPalette::nanoGlow, 4.0f);
     }
 }
 
@@ -821,31 +1074,81 @@ void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> 
     using Fr = Grid::Fr;
 
     Grid envelopeGrid;
-    envelopeGrid.templateRows = {
-        Track(Px(20)), Track(Px(58)), Track(Px(58)), // Macro: label, knobs
-        Track(Px(20)), Track(Px(58)), Track(Px(58)), // Nano: label, knobs
-        Track(Px(20)), Track(Px(58))  // Damping: label, knobs
-    };
+
+    // Add Window Type and Fade Length rows in advanced view
+    if (showAdvancedView) {
+        envelopeGrid.templateRows = {
+            Track(Px(20)), Track(Px(58)), Track(Px(58)), // Macro: label, knobs
+            Track(Px(20)), Track(Px(58)), Track(Px(58)), // Nano: label, knobs
+            Track(Px(20)), Track(Px(58)),                 // Damping: label, knobs
+            Track(Px(20)), Track(Px(30)),                 // Window Type: label, menu (advanced only)
+            Track(Px(10)),                                // Spacer row (advanced only)
+            Track(Px(30))                                 // Fade Length: horizontal slider (advanced only)
+        };
+    } else {
+        envelopeGrid.templateRows = {
+            Track(Px(20)), Track(Px(58)), Track(Px(58)), // Macro: label, knobs
+            Track(Px(20)), Track(Px(58)), Track(Px(58)), // Nano: label, knobs
+            Track(Px(20)), Track(Px(58))  // Damping: label, knobs
+        };
+    }
+
     envelopeGrid.templateColumns = { Track(Fr(1)), Track(Fr(1)) }; // 2 equal columns
     envelopeGrid.columnGap = Px(8);
     envelopeGrid.rowGap = Px(12);  // Gap between rows to fit all sections
 
-    envelopeGrid.items = {
-        // Macro Envelope section
-        GridItem(macroControlsLabel).withArea(1, 1, 1, 3),
-        GridItem(macroGateDualSlider).withArea(2, 1),
-        GridItem(macroShapeDualSlider).withArea(2, 2),
-        GridItem(macroSmoothSlider).withArea(3, 1, 3, 3),
-        // Nano Envelope section
-        GridItem(nanoControlsLabel).withArea(4, 1, 4, 3),
-        GridItem(nanoGateDualSlider).withArea(5, 1),
-        GridItem(nanoShapeDualSlider).withArea(5, 2),
-        GridItem(nanoSmoothSlider).withArea(6, 1, 6, 3),
-        // Damping section
-        GridItem(dampingLabel).withArea(7, 1, 7, 3),
-        GridItem(nanoEmaSlider).withArea(8, 1),
-        GridItem(nanoCycleCrossfadeSlider).withArea(8, 2)
-    };
+    if (showAdvancedView) {
+        windowTypeLabel->setVisible(true);
+        windowTypeMenu.setVisible(true);
+        fadeLengthLabel.setVisible(true);
+        fadeLengthSlider.setVisible(true);
+
+        envelopeGrid.items = {
+            // Macro Envelope section
+            GridItem(macroControlsLabel).withArea(1, 1, 1, 3),
+            GridItem(macroGateDualSlider).withArea(2, 1),
+            GridItem(macroShapeDualSlider).withArea(2, 2),
+            GridItem(macroSmoothSlider).withArea(3, 1, 3, 3),
+            // Nano Envelope section
+            GridItem(nanoControlsLabel).withArea(4, 1, 4, 3),
+            GridItem(nanoGateDualSlider).withArea(5, 1),
+            GridItem(nanoShapeDualSlider).withArea(5, 2),
+            GridItem(nanoSmoothSlider).withArea(6, 1, 6, 3),
+            // Damping section
+            GridItem(dampingLabel).withArea(7, 1, 7, 3),
+            GridItem(nanoEmaSlider).withArea(8, 1),
+            GridItem(nanoCycleCrossfadeSlider).withArea(8, 2),
+            // Window Type section (advanced view only)
+            GridItem(*windowTypeLabel).withArea(9, 1, 9, 3),
+            GridItem(windowTypeMenu).withArea(10, 1, 10, 3),
+            // Row 11 is spacer (no item needed)
+            // Fade Length section (advanced view only - label attaches to slider)
+            GridItem(fadeLengthSlider).withArea(12, 1, 12, 3)
+        };
+    } else {
+        windowTypeLabel->setVisible(false);
+        windowTypeMenu.setVisible(false);
+        fadeLengthLabel.setVisible(false);
+        fadeLengthSlider.setVisible(false);
+
+        envelopeGrid.items = {
+            // Macro Envelope section
+            GridItem(macroControlsLabel).withArea(1, 1, 1, 3),
+            GridItem(macroGateDualSlider).withArea(2, 1),
+            GridItem(macroShapeDualSlider).withArea(2, 2),
+            GridItem(macroSmoothSlider).withArea(3, 1, 3, 3),
+            // Nano Envelope section
+            GridItem(nanoControlsLabel).withArea(4, 1, 4, 3),
+            GridItem(nanoGateDualSlider).withArea(5, 1),
+            GridItem(nanoShapeDualSlider).withArea(5, 2),
+            GridItem(nanoSmoothSlider).withArea(6, 1, 6, 3),
+            // Damping section
+            GridItem(dampingLabel).withArea(7, 1, 7, 3),
+            GridItem(nanoEmaSlider).withArea(8, 1),
+            GridItem(nanoCycleCrossfadeSlider).withArea(8, 2)
+        };
+    }
+
     envelopeGrid.performLayout(bounds);
 }
 
@@ -980,13 +1283,13 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
     // Set up grid rows based on advanced view state
     if (showAdvancedView)
     {
-        // Advanced view: toggles (20) + numerators (20) + denominators (20) + sliders (90) + labels (15)
-        nanoGrid.templateRows = { Track(Px(20)), Track(Px(20)), Track(Px(20)), Track(Px(90)), Track(Px(15)) };
+        // Advanced view: toggles (20) + numerators (20) + denominators (20) + sliders (90) + labels (27 for 40×27 = 1.5:1 aspect ratio)
+        nanoGrid.templateRows = { Track(Px(20)), Track(Px(20)), Track(Px(20)), Track(Px(90)), Track(Px(27)) };
     }
     else
     {
-        // Simple view: sliders (90) + labels (15) - NO toggles
-        nanoGrid.templateRows = { Track(Px(90)), Track(Px(15)) };
+        // Simple view: sliders (90) + labels (27 for 40×27 = 1.5:1 aspect ratio) - NO toggles
+        nanoGrid.templateRows = { Track(Px(90)), Track(Px(27)) };
     }
 
     // Set up columns based on view mode
@@ -1005,7 +1308,7 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
                 nanoGrid.templateColumns.add(Track(Fr(1)));
     }
     nanoGrid.columnGap = Px(3);
-    nanoGrid.rowGap = Px(4);  // Increased spacing between rows
+    nanoGrid.rowGap = Px(0);  // No gap - labels directly under sliders
 
     // Add grid items
     nanoGrid.items.clear();
@@ -1053,7 +1356,13 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
             nanoGrid.items.add(GridItem(*nanoVariantSelectors[i]).withArea(2, columnIndex));
             nanoGrid.items.add(GridItem(*nanoDenominators[i]).withArea(3, columnIndex));
             nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(4, columnIndex));
-            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(5, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i])
+                .withArea(5, columnIndex)
+                .withWidth(40.0f)
+                .withHeight(27.0f)
+                .withMargin({-5, 0, 0, 0})  // Negative top margin to move closer to sliders
+                .withAlignSelf(GridItem::AlignSelf::center)
+                .withJustifySelf(GridItem::JustifySelf::center));
             columnIndex++;
         }
         else if (activeStates[i])
@@ -1076,7 +1385,13 @@ void NanoStuttAudioProcessorEditor::layoutNanoControls(juce::Rectangle<int> boun
 
             // Simple view: row 1 = sliders, row 2 = labels
             nanoGrid.items.add(GridItem(*nanoRateProbSliders[i]).withArea(1, columnIndex));
-            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i]).withArea(2, columnIndex));
+            nanoGrid.items.add(GridItem(*nanoIntervalLabels[i])
+                .withArea(2, columnIndex)
+                .withWidth(40.0f)
+                .withHeight(27.0f)
+                .withMargin({-5, 0, 0, 0})  // Negative top margin to move closer to sliders
+                .withAlignSelf(GridItem::AlignSelf::center)
+                .withJustifySelf(GridItem::JustifySelf::center));
             columnIndex++;
         }
         else
@@ -1371,8 +1686,17 @@ void NanoStuttAudioProcessorEditor::resized()
     int quantTotalHeight = showAdvancedView ? (20 + uniformSliderHeight + 12 + 8) : (uniformSliderHeight + 12 + 4);
     auto quantBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(quantTotalHeight);
 
-    // Add conditional border padding for quantization section (not shown in visible area, but for consistency)
-    // Note: Quantization section border is not currently drawn in paint(), but keeping pattern consistent
+    // Border includes toggles (advanced only), sliders, and labels (section label outside)
+    // Add more padding in advanced view for toggle buttons
+    if (showAdvancedView) {
+        quantizationSlidersBounds = quantBounds.expanded(4, 0)
+            .withTop(quantBounds.getY() - 4)
+            .withBottom(quantBounds.getBottom() + 6);
+    } else {
+        quantizationSlidersBounds = quantBounds.expanded(3, 0)
+            .withTop(quantBounds.getY())
+            .withBottom(quantBounds.getBottom() + 6);
+    }
 
     currentY += quantTotalHeight + sectionGap;
 
@@ -1974,5 +2298,36 @@ void NanoStuttAudioProcessorEditor::timerCallback()
             lastScaleIndex = currentScaleIndex;
             resized();  // Trigger layout update for new visibility states
         }
+    }
+
+    // Update nano label glow effects and colors based on active/playing state
+    int currentPlayingIndex = audioProcessor.getCurrentPlayingNanoRateIndex();
+
+    for (int i = 0; i < nanoIntervalLabels.size(); ++i)
+    {
+        // Check if this nano rate is enabled
+        bool isEnabled = audioProcessor.getParameters()
+            .getRawParameterValue("nanoActive_" + juce::String(i))->load() > 0.5f;
+
+        // Check if this is the currently playing rate
+        bool isPlaying = (currentPlayingIndex == i);
+
+        // Set border color based on enabled state (independent of playing glow)
+        if (isEnabled) {
+            nanoIntervalLabels[i]->setBorderColour(ColorPalette::nanoPurple);  // Bright purple for enabled
+        } else {
+            nanoIntervalLabels[i]->setBorderColour(ColorPalette::nanoPurple.darker(0.6f));  // Dimmed purple for disabled
+        }
+
+        // Set glow intensity based on playing state
+        float glowIntensity = 0.0f;
+        if (isPlaying) {
+            glowIntensity = 1.0f;  // Brightest glow for currently playing rate
+        } else if (isEnabled) {
+            glowIntensity = 0.3f;  // Subtle glow for enabled rates
+        }
+        // else: 0.0f (no glow for disabled rates)
+
+        nanoIntervalLabels[i]->setGlowIntensity(glowIntensity);
     }
 }

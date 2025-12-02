@@ -103,7 +103,9 @@ void NanoStuttAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
 
     maxStutterLenSamples = static_cast<int>(sampleRate * MAX_STUTTER_BUFFER_SECONDS);
     stutterBuffer.setSize(getTotalNumOutputChannels(), maxStutterLenSamples, false, true, true);
-    fadeLengthInSamples = static_cast<int>(sampleRate * FADE_DURATION_SECONDS);
+
+    float fadeLengthMs = parameters.getRawParameterValue("FadeLength")->load();
+    fadeLengthInSamples = static_cast<int>(sampleRate * (fadeLengthMs / 1000.0));
 
     // Initialize EMA state for nano smooth filter
     nanoEmaState.resize(getTotalNumOutputChannels(), 0.0f);
@@ -200,6 +202,10 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     auto numSamples             = buffer.getNumSamples();
     auto sampleRate             = getSampleRate();
 
+    // Update fade length based on current parameter value
+    float fadeLengthMs = parameters.getRawParameterValue("FadeLength")->load();
+    fadeLengthInSamples = static_cast<int>(sampleRate * (fadeLengthMs / 1000.0));
+
     // Check if host transport is playing - only process stuttering when transport is running
     auto playHead = getPlayHead();
     if (playHead == nullptr) {
@@ -252,6 +258,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         writePos = 0;
         currentlyUsingNanoRate.store(false);
         currentNanoFrequency.store(0.0f);
+        currentPlayingNanoRateIndex.store(-1);
         return;
     }
 
@@ -457,10 +464,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 macroProgress = juce::jlimit(0.0f, 1.0f, macroProgress);
                 float macroGain = calculateEnvelopeGain(macroProgress, currentMacroShapeParam);
 
-                // Apply macro smooth (Hann window) if needed
-                if (currentMacroSmoothParam > 0.01f) {
-                    float hannGain = calculateHannWindow(macroProgress);
-                    macroGain *= (1.0f - currentMacroSmoothParam) + (currentMacroSmoothParam * hannGain);
+                // Apply macro smooth (window function) if needed
+                if (currentMacroSmoothParam > 0.0001f && currentWindowType != 0) {
+                    if (isAdjustableWindow(currentWindowType)) {
+                        // Adjustable windows: apply directly at 100% (no blend)
+                        float windowGain = calculateWindowGain(currentWindowType, macroProgress, currentMacroSmoothParam);
+                        macroGain *= windowGain;
+                    } else {
+                        // Fixed windows: blend based on macroSmoothParam
+                        float windowGain = calculateWindowGain(currentWindowType, macroProgress, currentMacroSmoothParam);
+                        macroGain *= (1.0f - currentMacroSmoothParam) + (currentMacroSmoothParam * windowGain);
+                    }
                 }
 
                 // Calculate nano envelope gain
@@ -506,6 +520,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 writePos = 0;
                 currentlyUsingNanoRate.store(false);
                 currentNanoFrequency.store(0.0f);
+                currentPlayingNanoRateIndex.store(-1);
             }
 
             // Skip remaining processing for this sample
@@ -541,6 +556,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             // Reset nano rate tracking
             currentlyUsingNanoRate.store(false);
             currentNanoFrequency.store(0.0f);
+            currentPlayingNanoRateIndex.store(-1);
 
             // Add post-stutter silence if macro gate < 1.0
             // Use CURRENT parameters (the event that just ended)
@@ -640,15 +656,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                         double sliceDuration = nanoBase / runtimeNanoRatios[selectedIndex];
                         chosenDenominator = WHOLE_NOTE_SECONDS_MULTIPLIER / (bpm * sliceDuration);
 
-                        // Update nano rate tracking for tuner
+                        // Update nano rate tracking for tuner and UI
                         currentlyUsingNanoRate.store(true);
                         currentNanoFrequency.store(static_cast<float>(1.0 / sliceDuration));
+                        currentPlayingNanoRateIndex.store(selectedIndex);  // Store which nano rate is playing
                     } else {
                         chosenDenominator = regularDenominators[selectedIndex];
 
                         // Not using nano rate
                         currentlyUsingNanoRate.store(false);
                         currentNanoFrequency.store(0.0f);
+                        currentPlayingNanoRateIndex.store(-1);  // No nano rate playing
                     }
                     
                     autoStutterRemainingSamples = stutterEventLengthSamples;
@@ -680,7 +698,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // This ensures fades use the correct randomized values
                     currentNanoGateParam = nextNanoGateParam;
                     currentNanoShapeParam = nextNanoShapeParam;
-                    currentNanoSmoothParam = nextNanoSmoothParam;      // Hann window smoothing
+                    currentNanoSmoothParam = nextNanoSmoothParam;      // Window smoothing intensity
+                    currentWindowType = nextWindowType;                // Window type selection
                     currentNanoEmaParam = nextNanoEmaParam;            // EMA filter
                     currentNanoOctaveParam = nextNanoOctaveParam;
 
@@ -700,10 +719,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                         // Calculate what the first sample's nano envelope gain will be (progress = 0.0)
                         float firstSampleNanoGain = calculateEnvelopeGain(0.0f, currentNanoShapeParam);
 
-                        // Apply Hann window if nano smooth is active (must match first sample processing)
-                        if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
-                            float hannGain = calculateHannWindow(0.0f);  // First sample at progress 0.0
-                            firstSampleNanoGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * hannGain);
+                        // Apply window if nano smooth is active (must match first sample processing)
+                        if (currentNanoSmoothParam > 0.0001f && currentWindowType != 0 && heldNanoEnvelopeLengthInSamples > 0) {
+                            if (isAdjustableWindow(currentWindowType)) {
+                                // Adjustable windows: apply directly at 100% (no blend)
+                                float windowGain = calculateWindowGain(currentWindowType, 0.0f, currentNanoSmoothParam);
+                                firstSampleNanoGain *= windowGain;
+                            } else {
+                                // Fixed windows: blend based on nanoSmoothParam
+                                float windowGain = calculateWindowGain(currentWindowType, 0.0f, currentNanoSmoothParam);
+                                firstSampleNanoGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * windowGain);
+                            }
                         }
 
                         for (int ch = 0; ch < totalNumOutputChannels; ++ch) {
@@ -742,15 +768,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         }
  
         // =============================================================================
-        // DECISION POINT 2: PARAMETER SAMPLING (2ms before stutter event BEGINS)
-        // Sample macro envelope controls 2ms before ANY stutter event starts
+        // DECISION POINT 2: PARAMETER SAMPLING (dynamic timing: 1ms before fade starts)
+        // Sample macro envelope controls before fade begins to prevent mid-fade jumps
+        // Timing: (fade_length + 1ms) before stutter event starts
         // This ensures the next stutter event uses fresh parameter values
         // =============================================================================
-        int twoMsInSamples = static_cast<int>(sampleRate * (PARAMETER_SAMPLE_ADVANCE_MS / 1000.0));
+        int oneMsInSamples = static_cast<int>(sampleRate * 0.001);
+        int parameterSampleAdvanceSamples = fadeLengthInSamples + oneMsInSamples;
         // parametersSampledForUpcomingEvent is now a member variable (prevent multiple sampling for same upcoming event)
 
         // Check if a stutter event will start soon (using corrected quantization boundary logic)
-        bool stutterStartingSoon = (stutterIsScheduled && quantCount >= std::max(1, quantToNewBeat - 1) && samplesToNextBeat <= twoMsInSamples);
+        bool stutterStartingSoon = (stutterIsScheduled && quantCount >= std::max(1, quantToNewBeat - 1) && samplesToNextBeat <= parameterSampleAdvanceSamples);
 
         if (stutterStartingSoon) {
             if (!parametersSampledForUpcomingEvent) {
@@ -877,7 +905,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     nextNanoGateParam = std::round(nextNanoGateParam / 0.25f) * 0.25f;
 
                 nextNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + nanoShapeRandomOffset);
-                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();      // Hann window smoothing
+                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();      // Window smoothing intensity
+                nextWindowType = params.getRawParameterValue("WindowType")->load();            // Window type selection
                 nextNanoEmaParam = params.getRawParameterValue("NanoEmaFilter")->load();      // EMA filter
 
                 // Apply octave random offset (round base and clamp result)
@@ -1006,7 +1035,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     nextNanoGateParam = std::round(nextNanoGateParam / 0.25f) * 0.25f;
 
                 nextNanoShapeParam = juce::jlimit(0.0f, 1.0f, nanoShapeBase + nanoShapeRandomOffset);
-                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();      // Hann window smoothing
+                nextNanoSmoothParam = params.getRawParameterValue("NanoSmooth")->load();      // Window smoothing intensity
+                nextWindowType = params.getRawParameterValue("WindowType")->load();            // Window type selection
                 nextNanoEmaParam = params.getRawParameterValue("NanoEmaFilter")->load();      // EMA filter
 
                 heldNanoGateRandomOffset = nanoGateRandomOffset;
@@ -1089,10 +1119,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
                 float nextFirstSampleMacroGain = calculateEnvelopeGain(firstSampleProgress, nextMacroShapeParam);
 
-                // Apply Hann window smoothing if enabled
-                if (nextMacroSmoothParam > 0.01f) {
-                    float hannGain = calculateHannWindow(firstSampleProgress);
-                    nextFirstSampleMacroGain *= (1.0f - nextMacroSmoothParam) + (nextMacroSmoothParam * hannGain);
+                // Apply window smoothing if enabled
+                if (nextMacroSmoothParam > 0.0001f && nextWindowType != 0) {
+                    if (isAdjustableWindow(nextWindowType)) {
+                        // Adjustable windows: apply directly at 100% (no blend)
+                        float windowGain = calculateWindowGain(nextWindowType, firstSampleProgress, nextMacroSmoothParam);
+                        nextFirstSampleMacroGain *= windowGain;
+                    } else {
+                        // Fixed windows: blend based on macroSmoothParam
+                        float windowGain = calculateWindowGain(nextWindowType, firstSampleProgress, nextMacroSmoothParam);
+                        nextFirstSampleMacroGain *= (1.0f - nextMacroSmoothParam) + (nextMacroSmoothParam * windowGain);
+                    }
                 }
 
                 // Calculate nano envelope gain for first sample (using NEXT parameters - what we're fading to)
@@ -1101,10 +1138,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float firstSampleNanoProgress = 1.0f / (float)nanoEnvelopeLengthSamples;
                 float nextFirstSampleNanoGain = calculateEnvelopeGain(firstSampleNanoProgress, nextNanoShapeParam);
 
-                // Apply Hann window smoothing to nano gain if enabled (for accurate fade target)
-                if (nextNanoSmoothParam > 0.01f && nanoEnvelopeLengthSamples > 0) {
-                    float hannGain = calculateHannWindow(firstSampleNanoProgress);
-                    nextFirstSampleNanoGain *= (1.0f - nextNanoSmoothParam) + (nextNanoSmoothParam * hannGain);
+                // Apply window smoothing to nano gain if enabled (for accurate fade target)
+                if (nextNanoSmoothParam > 0.0001f && nextWindowType != 0 && nanoEnvelopeLengthSamples > 0) {
+                    if (isAdjustableWindow(nextWindowType)) {
+                        // Adjustable windows: apply directly at 100% (no blend)
+                        float windowGain = calculateWindowGain(nextWindowType, firstSampleNanoProgress, nextNanoSmoothParam);
+                        nextFirstSampleNanoGain *= windowGain;
+                    } else {
+                        // Fixed windows: blend based on nanoSmoothParam
+                        float windowGain = calculateWindowGain(nextWindowType, firstSampleNanoProgress, nextNanoSmoothParam);
+                        nextFirstSampleNanoGain *= (1.0f - nextNanoSmoothParam) + (nextNanoSmoothParam * windowGain);
+                    }
                 }
 
                 // Combine macro and nano gains for accurate first sample gain
@@ -1124,10 +1168,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float firstSampleProgress = 1.0f / (float)effectiveMacroLength;
                 float nextFirstSampleMacroGain = calculateEnvelopeGain(firstSampleProgress, nextMacroShapeParam);
 
-                // Apply Hann window smoothing if enabled
-                if (nextMacroSmoothParam > 0.01f) {
-                    float hannGain = calculateHannWindow(firstSampleProgress);
-                    nextFirstSampleMacroGain *= (1.0f - nextMacroSmoothParam) + (nextMacroSmoothParam * hannGain);
+                // Apply window smoothing if enabled
+                if (nextMacroSmoothParam > 0.0001f && nextWindowType != 0) {
+                    if (isAdjustableWindow(nextWindowType)) {
+                        // Adjustable windows: apply directly at 100% (no blend)
+                        float windowGain = calculateWindowGain(nextWindowType, firstSampleProgress, nextMacroSmoothParam);
+                        nextFirstSampleMacroGain *= windowGain;
+                    } else {
+                        // Fixed windows: blend based on macroSmoothParam
+                        float windowGain = calculateWindowGain(nextWindowType, firstSampleProgress, nextMacroSmoothParam);
+                        nextFirstSampleMacroGain *= (1.0f - nextMacroSmoothParam) + (nextMacroSmoothParam * windowGain);
+                    }
                 }
 
                 // Calculate nano envelope gain for first sample (using NEXT parameters - what we're fading to)
@@ -1136,10 +1187,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float firstSampleNanoProgress = 1.0f / (float)nanoEnvelopeLengthSamples;
                 float nextFirstSampleNanoGain = calculateEnvelopeGain(firstSampleNanoProgress, nextNanoShapeParam);
 
-                // Apply Hann window smoothing to nano gain if enabled (for accurate fade target)
-                if (nextNanoSmoothParam > 0.01f && nanoEnvelopeLengthSamples > 0) {
-                    float hannGain = calculateHannWindow(firstSampleNanoProgress);
-                    nextFirstSampleNanoGain *= (1.0f - nextNanoSmoothParam) + (nextNanoSmoothParam * hannGain);
+                // Apply window smoothing to nano gain if enabled (for accurate fade target)
+                if (nextNanoSmoothParam > 0.0001f && nextWindowType != 0 && nanoEnvelopeLengthSamples > 0) {
+                    if (isAdjustableWindow(nextWindowType)) {
+                        // Adjustable windows: apply directly at 100% (no blend)
+                        float windowGain = calculateWindowGain(nextWindowType, firstSampleNanoProgress, nextNanoSmoothParam);
+                        nextFirstSampleNanoGain *= windowGain;
+                    } else {
+                        // Fixed windows: blend based on nanoSmoothParam
+                        float windowGain = calculateWindowGain(nextWindowType, firstSampleNanoProgress, nextNanoSmoothParam);
+                        nextFirstSampleNanoGain *= (1.0f - nextNanoSmoothParam) + (nextNanoSmoothParam * windowGain);
+                    }
                 }
 
                 // Combine macro and nano gains for accurate first sample gain
@@ -1332,15 +1390,21 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // else: nanoGain stays 0.0 (silent after heldNanoEnvelopeLengthInSamples)
                 }
 
-                // NANO SMOOTH (Hann window over gated portion of repeat cycle)
-                // 0.0 = no Hann (bypass), 1.0 = full Hann window applied to gated region
-                // Apply Hann window based on position within gated region (correlates with gate value)
-                if (currentNanoSmoothParam > 0.01f && nanoGain > 0.0f && heldNanoEnvelopeLengthInSamples > 0) {
+                // NANO SMOOTH (window function over gated portion of repeat cycle)
+                // 0.0 = bypass, > 0.0 = window applied (blend for fixed, parameter control for adjustable)
+                // Apply window based on position within gated region (correlates with gate value)
+                if (currentNanoSmoothParam > 0.0001f && currentWindowType != 0 && nanoGain > 0.0f && heldNanoEnvelopeLengthInSamples > 0) {
                     // Calculate progress through gated region (nanoProgress is already 0.0 → 1.0 within gate)
                     // Use nanoProgress which was calculated above for forward/reverse cases
-                    float hannGain = calculateHannWindow(nanoProgress);
-                    // Blend between original envelope (no smooth) and Hann-windowed envelope (full smooth)
-                    nanoGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * hannGain);
+                    if (isAdjustableWindow(currentWindowType)) {
+                        // Adjustable windows: apply directly at 100% (no blend)
+                        float windowGain = calculateWindowGain(currentWindowType, nanoProgress, currentNanoSmoothParam);
+                        nanoGain *= windowGain;
+                    } else {
+                        // Fixed windows: blend based on nanoSmoothParam
+                        float windowGain = calculateWindowGain(currentWindowType, nanoProgress, currentNanoSmoothParam);
+                        nanoGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * windowGain);
+                    }
                 }
 
                 // MACRO ENVELOPE (controls overall event shape)
@@ -1350,18 +1414,24 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 float macroProgress = juce::jlimit(0.0f, 1.0f, (float)macroEnvelopeCounter / (float)effectiveMacroLength);
                 float macroGain = calculateEnvelopeGain(macroProgress, currentMacroShapeParam);
 
-                // Apply macro smooth (Hann window envelope over entire event)
-                // 0.0 = no Hann (bypass), 1.0 = full Hann window applied
-                if (currentMacroSmoothParam > 0.01f) {
-                    // Calculate Hann window gain: 0 → 1 → 0 across event
-                    float hannGain = calculateHannWindow(macroProgress);
-                    // Blend between original envelope (no smooth) and Hann-windowed envelope (full smooth)
-                    macroGain *= (1.0f - currentMacroSmoothParam) + (currentMacroSmoothParam * hannGain);
+                // Apply macro smooth (window function over entire event)
+                // 0.0 = bypass, > 0.0 = window applied (blend for fixed, parameter control for adjustable)
+                if (currentMacroSmoothParam > 0.0001f && currentWindowType != 0) {
+                    if (isAdjustableWindow(currentWindowType)) {
+                        // Adjustable windows: apply directly at 100% (no blend)
+                        float windowGain = calculateWindowGain(currentWindowType, macroProgress, currentMacroSmoothParam);
+                        macroGain *= windowGain;
+                    } else {
+                        // Fixed windows: blend based on macroSmoothParam
+                        float windowGain = calculateWindowGain(currentWindowType, macroProgress, currentMacroSmoothParam);
+                        macroGain *= (1.0f - currentMacroSmoothParam) + (currentMacroSmoothParam * windowGain);
+                    }
                 }
 
                 if (macroEnvelopeCounter <= effectiveMacroLength) {
-                    // Check if we're in fade-out region (constant 1ms fade)
-                    int fadeOutLen = static_cast<int>(sampleRate * FADE_DURATION_SECONDS);
+                    // Check if we're in fade-out region (user-controllable fade length)
+                    float fadeLengthMs = parameters.getRawParameterValue("FadeLength")->load();
+                    int fadeOutLen = static_cast<int>(sampleRate * (fadeLengthMs / 1000.0));
                     int fadeOutStart = std::max(1, effectiveMacroLength - fadeOutLen);
 
                     if (macroEnvelopeCounter >= fadeOutStart && fadeOutLen > 0) {
@@ -1423,10 +1493,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                                         }
                                     }
 
-                                    // Apply Hann windowing to tail envelope
-                                    if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
-                                        float tailHannGain = calculateHannWindow(tailProgress);
-                                        tailEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * tailHannGain);
+                                    // Apply windowing to tail envelope
+                                    if (currentNanoSmoothParam > 0.0001f && currentWindowType != 0 && heldNanoEnvelopeLengthInSamples > 0) {
+                                        if (isAdjustableWindow(currentWindowType)) {
+                                            // Adjustable windows: apply directly at 100% (no blend)
+                                            float tailWindowGain = calculateWindowGain(currentWindowType, tailProgress, currentNanoSmoothParam);
+                                            tailEnvelopeGain *= tailWindowGain;
+                                        } else {
+                                            // Fixed windows: blend based on nanoSmoothParam
+                                            float tailWindowGain = calculateWindowGain(currentWindowType, tailProgress, currentNanoSmoothParam);
+                                            tailEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * tailWindowGain);
+                                        }
                                     }
                                 }
 
@@ -1438,10 +1515,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                                     float headProgress = (float)headLoopPos / (float)heldNanoEnvelopeLengthInSamples;
                                     headEnvelopeGain = calculateEnvelopeGain(headProgress, currentNanoShapeParam);
 
-                                    // Apply Hann windowing to head envelope
-                                    if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
-                                        float headHannGain = calculateHannWindow(headProgress);
-                                        headEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * headHannGain);
+                                    // Apply windowing to head envelope
+                                    if (currentNanoSmoothParam > 0.0001f && currentWindowType != 0 && heldNanoEnvelopeLengthInSamples > 0) {
+                                        if (isAdjustableWindow(currentWindowType)) {
+                                            // Adjustable windows: apply directly at 100% (no blend)
+                                            float headWindowGain = calculateWindowGain(currentWindowType, headProgress, currentNanoSmoothParam);
+                                            headEnvelopeGain *= headWindowGain;
+                                        } else {
+                                            // Fixed windows: blend based on nanoSmoothParam
+                                            float headWindowGain = calculateWindowGain(currentWindowType, headProgress, currentNanoSmoothParam);
+                                            headEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * headWindowGain);
+                                        }
                                     }
                                 }
 
@@ -1486,10 +1570,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                                         }
                                     }
 
-                                    // Apply Hann windowing to head envelope
-                                    if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
-                                        float headHannGain = calculateHannWindow(headProgress);
-                                        headEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * headHannGain);
+                                    // Apply windowing to head envelope
+                                    if (currentNanoSmoothParam > 0.0001f && currentWindowType != 0 && heldNanoEnvelopeLengthInSamples > 0) {
+                                        if (isAdjustableWindow(currentWindowType)) {
+                                            // Adjustable windows: apply directly at 100% (no blend)
+                                            float headWindowGain = calculateWindowGain(currentWindowType, headProgress, currentNanoSmoothParam);
+                                            headEnvelopeGain *= headWindowGain;
+                                        } else {
+                                            // Fixed windows: blend based on nanoSmoothParam
+                                            float headWindowGain = calculateWindowGain(currentWindowType, headProgress, currentNanoSmoothParam);
+                                            headEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * headWindowGain);
+                                        }
                                     }
                                 }
 
@@ -1512,10 +1603,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                                         }
                                     }
 
-                                    // Apply Hann windowing to tail envelope
-                                    if (currentNanoSmoothParam > 0.01f && heldNanoEnvelopeLengthInSamples > 0) {
-                                        float tailHannGain = calculateHannWindow(tailProgress);
-                                        tailEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * tailHannGain);
+                                    // Apply windowing to tail envelope
+                                    if (currentNanoSmoothParam > 0.0001f && currentWindowType != 0 && heldNanoEnvelopeLengthInSamples > 0) {
+                                        if (isAdjustableWindow(currentWindowType)) {
+                                            // Adjustable windows: apply directly at 100% (no blend)
+                                            float tailWindowGain = calculateWindowGain(currentWindowType, tailProgress, currentNanoSmoothParam);
+                                            tailEnvelopeGain *= tailWindowGain;
+                                        } else {
+                                            // Fixed windows: blend based on nanoSmoothParam
+                                            float tailWindowGain = calculateWindowGain(currentWindowType, tailProgress, currentNanoSmoothParam);
+                                            tailEnvelopeGain *= (1.0f - currentNanoSmoothParam) + (currentNanoSmoothParam * tailWindowGain);
+                                        }
                                     }
                                 }
 
@@ -1716,7 +1814,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     auto driveAmount = parameters.getRawParameterValue("Drive")->load();
     auto gainCompensation = parameters.getRawParameterValue("GainCompensation")->load();
 
-    if (driveAmount > 0.0f && waveshapeAlgorithm > 0)
+    if (waveshapeAlgorithm > 0)
     {
         // Update waveshaper function and gains
         updateWaveshaperFunction(static_cast<int>(waveshapeAlgorithm), driveAmount, gainCompensation > 0.5f);
@@ -1908,7 +2006,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGate", 1), "Nano Gate", 0.0f, 1.0f, 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShape", 1), "Nano Shape", 0.0f, 1.0f, 0.5f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoSmooth", 1), "Nano Smooth", 0.0f, 1.0f, 0.0f));  // Hann window smoothing
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoSmooth", 1), "Nano Smooth", 0.0f, 1.0f, 0.0f));  // Window smoothing intensity
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("WindowType", 1),
+        "Window Type",
+        juce::StringArray { "None", "Hann", "Hamming", "Blackman", "Blackman-Harris",
+                            "Bartlett", "Kaiser", "Tukey", "Gaussian", "Planck", "Exponential" },
+        7,  // Default: Tukey (index 7)
+        juce::AudioParameterChoiceAttributes().withLabel("Window")
+    ));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoEmaFilter", 1), "EMA Filter", 0.0f, 1.0f, 0.0f));  // EMA damping filter
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("CycleCrossfade", 1), "Cycle Crossfade", 0.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGateRandom", 1), "Nano Gate Random", -1.0f, 1.0f, 0.0f));
@@ -1940,6 +2046,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("TimingOffset", 1), "Timing Offset (ms)",
         -100.0f, 100.0f, 0.0f));
+
+    // Fade length parameter for crossfade duration control
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("FadeLength", 1), "Fade Length",
+        juce::NormalisableRange<float>(
+            0.0001f,  // min
+            30.0f,    // max
+            0.0f,     // interval: continuous
+            0.3f      // skew: logarithmic scale
+        ),
+        1.0f,         // default: 1.0ms
+        "ms",
+        juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 2) + " ms"; },
+        [](const juce::String& text) { return text.retainCharacters("0123456789.").getFloatValue(); }
+    ));
 
     // Waveshaping parameters
     params.push_back(std::make_unique<juce::AudioParameterChoice>(

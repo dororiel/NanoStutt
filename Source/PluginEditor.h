@@ -12,6 +12,11 @@
 #include "PluginProcessor.h"
 #include "DualSlider.h"
 #include "AutoStutterIndicator.h"
+#include "ModernLookAndFeel.h"
+#include "ColorPalette.h"
+#include "GlowEffect.h"
+#include "TextureGenerator.h"
+#include "RomanNumeralLabel.h"
 
 //==============================================================================
 /**
@@ -26,75 +31,211 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        g.fillAll(juce::Colours::black);
+        auto bounds = getLocalBounds().toFloat();
+        double currentTime = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
+        //==============================================================================
+        // LAYER 1: BACKGROUND GRADIENT
+        //==============================================================================
+        juce::ColourGradient bgGradient(
+            juce::Colour(0xff000000),
+            bounds.getX(), bounds.getY(),
+            juce::Colour(0xff0a0a10),
+            bounds.getX(), bounds.getBottom(),
+            false
+        );
+        g.setGradientFill(bgGradient);
+        g.fillRect(bounds);
+
+        //==============================================================================
+        // LAYER 2: GRID PATTERN (Oscilloscope style)
+        //==============================================================================
+        g.setColour(juce::Colours::white.withAlpha(0.03f));
+
+        // Vertical grid lines (every 1/16 note)
+        int numVerticalLines = 16;
+        for (int i = 0; i <= numVerticalLines; i++)
+        {
+            float x = bounds.getX() + (i * bounds.getWidth() / numVerticalLines);
+            g.drawVerticalLine(static_cast<int>(x), bounds.getY(), bounds.getBottom());
+        }
+
+        // Horizontal grid lines (amplitude markers)
+        int numHorizontalLines = 5;
+        for (int i = 0; i <= numHorizontalLines; i++)
+        {
+            float y = bounds.getY() + (i * bounds.getHeight() / numHorizontalLines);
+            g.drawHorizontalLine(static_cast<int>(y), bounds.getX(), bounds.getRight());
+        }
+
+        // Brighter center line
+        g.setColour(juce::Colours::white.withAlpha(0.08f));
+        g.drawHorizontalLine(static_cast<int>(bounds.getCentreY()), bounds.getX(), bounds.getRight());
+
+        //==============================================================================
+        // LAYER 3: WAVEFORM WITH GLOW
+        //==============================================================================
         const auto& buffer = processor.getOutputBuffer();
         const auto& stateBuffer = processor.getStutterStateBuffer();
         const int bufferSize = processor.getOutputBufferSize();
         const int writePos = processor.getOutputBufferWritePos();
 
-        if (bufferSize == 0 || buffer.getNumChannels() == 0)
-            return;
-
-        // Draw waveform with color-coding - display entire buffer directly (index 0 to bufferSize)
-        const int channel = 0; // Show left/mono
-        const float midY = getHeight() / 2.0f;
-        const float scaleY = midY * 0.8f;
-
-        // Sample every N samples for efficiency (adjust based on width)
-        const int sampleStep = juce::jmax(1, bufferSize / (getWidth() * 2));
-
-        // Define colors matching AutoStutterIndicator
-        const juce::Colour colorNone = juce::Colours::lime;           // Green
-        const juce::Colour colorRepeat = juce::Colour(0xffff9933);    // Orange
-        const juce::Colour colorNano = juce::Colour(0xff9966ff);      // Purple
-
-        // Build colored segments - display buffer directly
-        int currentState = -1;
-        juce::Path currentPath;
-        juce::Colour currentColor = colorNone;
-
-        for (int i = 0; i < bufferSize; i += sampleStep)
+        if (bufferSize > 0 && buffer.getNumChannels() > 0)
         {
-            float sample = buffer.getSample(channel, i);
-            int state = stateBuffer[i];
+            const int channel = 0; // Show left/mono
+            const float midY = bounds.getCentreY();
+            const float scaleY = bounds.getHeight() * 0.35f;
 
-            float x = (static_cast<float>(i) / bufferSize) * getWidth();
-            float y = midY - sample * scaleY;
+            // Sample every N samples for efficiency
+            const int sampleStep = juce::jmax(1, bufferSize / (static_cast<int>(bounds.getWidth()) * 2));
 
-            // Check if state changed - start new path segment
-            if (state != currentState)
+            // Define modern colors
+            const juce::Colour colorNone = ColorPalette::activeGreen;
+            const juce::Colour colorRepeat = ColorPalette::rhythmicOrange;
+            const juce::Colour colorNano = ColorPalette::nanoPurple;
+
+            // Build colored segments
+            int currentState = -1;
+            juce::Path currentPath;
+            juce::Colour currentColor = colorNone;
+
+            for (int i = 0; i < bufferSize; i += sampleStep)
             {
-                // Draw previous segment if it exists
-                if (!currentPath.isEmpty())
+                float sample = buffer.getSample(channel, i);
+                int state = stateBuffer[i];
+
+                float x = bounds.getX() + (static_cast<float>(i) / bufferSize) * bounds.getWidth();
+                float y = midY - sample * scaleY;
+
+                if (state != currentState)
                 {
-                    g.setColour(currentColor);
-                    g.strokePath(currentPath, juce::PathStrokeType(1.5f));
+                    // Draw previous segment with glow
+                    if (!currentPath.isEmpty())
+                    {
+                        // Outer glow (blur effect with multiple strokes)
+                        GlowEffect::drawStrokeWithGlow(g, currentPath,
+                                                        currentColor, 2.5f,
+                                                        currentColor.withSaturation(0.6f), 6.0f, 4);
+
+                        // Inner highlight
+                        g.setColour(juce::Colours::white.withAlpha(0.3f));
+                        g.strokePath(currentPath, juce::PathStrokeType(1.0f));
+                    }
+
+                    // Start new segment
+                    currentState = state;
+                    currentColor = (state == 0) ? colorNone : (state == 1) ? colorRepeat : colorNano;
+                    currentPath.clear();
+                    currentPath.startNewSubPath(x, y);
                 }
-
-                // Start new segment
-                currentState = state;
-                currentColor = (state == 0) ? colorNone : (state == 1) ? colorRepeat : colorNano;
-                currentPath.clear();
-                currentPath.startNewSubPath(x, y);
+                else
+                {
+                    currentPath.lineTo(x, y);
+                }
             }
-            else
+
+            // Draw final segment with glow
+            if (!currentPath.isEmpty())
             {
-                currentPath.lineTo(x, y);
+                GlowEffect::drawStrokeWithGlow(g, currentPath,
+                                                currentColor, 2.5f,
+                                                currentColor.withSaturation(0.6f), 6.0f, 4);
+
+                g.setColour(juce::Colours::white.withAlpha(0.3f));
+                g.strokePath(currentPath, juce::PathStrokeType(1.0f));
+            }
+
+            //==============================================================================
+            // LAYER 4: REFLECTION (below waveform)
+            //==============================================================================
+            currentState = -1;
+            currentPath.clear();
+            currentColor = colorNone;
+
+            for (int i = 0; i < bufferSize; i += sampleStep)
+            {
+                float sample = buffer.getSample(channel, i);
+                int state = stateBuffer[i];
+
+                float x = bounds.getX() + (static_cast<float>(i) / bufferSize) * bounds.getWidth();
+                float y = midY + sample * scaleY * 0.3f; // Flipped and smaller
+
+                if (state != currentState)
+                {
+                    if (!currentPath.isEmpty())
+                    {
+                        // Reflection with gradient fade
+                        g.setColour(currentColor.withAlpha(0.15f));
+                        g.strokePath(currentPath, juce::PathStrokeType(1.5f));
+                    }
+
+                    currentState = state;
+                    currentColor = (state == 0) ? colorNone : (state == 1) ? colorRepeat : colorNano;
+                    currentPath.clear();
+                    currentPath.startNewSubPath(x, y);
+                }
+                else
+                {
+                    currentPath.lineTo(x, y);
+                }
+            }
+
+            if (!currentPath.isEmpty())
+            {
+                g.setColour(currentColor.withAlpha(0.15f));
+                g.strokePath(currentPath, juce::PathStrokeType(1.5f));
+            }
+
+            //==============================================================================
+            // LAYER 5: PLAYHEAD INDICATOR (Gradient with glow)
+            //==============================================================================
+            if (bufferSize > 0)
+            {
+                float playheadX = bounds.getX() + (static_cast<float>(writePos) / bufferSize) * bounds.getWidth();
+                juce::Point<float> topPoint(playheadX, bounds.getY());
+                juce::Point<float> bottomPoint(playheadX, bounds.getBottom());
+
+                // Glow behind playhead
+                GlowEffect::drawGlowingLine(g, topPoint, bottomPoint,
+                                             juce::Colours::white, 2.0f,
+                                             juce::Colours::white, 8.0f);
+
+                // Top triangle marker
+                juce::Path triangle;
+                triangle.addTriangle(playheadX, bounds.getY(),
+                                      playheadX - 5.0f, bounds.getY() + 8.0f,
+                                      playheadX + 5.0f, bounds.getY() + 8.0f);
+                g.setColour(juce::Colours::white);
+                g.fillPath(triangle);
             }
         }
 
-        // Draw final segment
-        if (!currentPath.isEmpty())
+        //==============================================================================
+        // LAYER 6: SCROLLING SCANLINES
+        //==============================================================================
+        float scrollOffset = std::fmod(static_cast<float>(currentTime * 20.0), 8.0f); // Slow scroll
+        for (int i = 0; i < 15; i++)
         {
-            g.setColour(currentColor);
-            g.strokePath(currentPath, juce::PathStrokeType(1.5f));
+            float y = bounds.getY() + (i * 8.0f) + scrollOffset;
+            if (y < bounds.getBottom())
+            {
+                g.setColour(juce::Colours::white.withAlpha(0.05f));
+                g.drawHorizontalLine(static_cast<int>(y), bounds.getX(), bounds.getRight());
+            }
         }
 
-        // Draw playhead indicator (vertical line showing current write position)
-        float playheadX = (static_cast<float>(writePos) / bufferSize) * getWidth();
-        g.setColour(juce::Colours::white.withAlpha(0.7f));
-        g.drawLine(playheadX, 0, playheadX, static_cast<float>(getHeight()), 2.0f);
+        //==============================================================================
+        // LAYER 7: HUD CORNER BRACKETS
+        //==============================================================================
+        juce::Path brackets = TextureGenerator::createCornerBracket(bounds, 12, true, true, true, true);
+        g.setColour(ColorPalette::accentCyan.withAlpha(0.4f));
+        g.strokePath(brackets, juce::PathStrokeType(2.0f));
+
+        //==============================================================================
+        // LAYER 8: OUTER FRAME
+        //==============================================================================
+        g.setColour(ColorPalette::frameGrey);
+        g.drawRect(bounds, 1.0f);
     }
 
 private:
@@ -113,7 +254,14 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        g.fillAll(juce::Colours::black);
+        auto bounds = getLocalBounds().toFloat();
+
+        //==============================================================================
+        // BACKGROUND - Recessed panel with gradient
+        //==============================================================================
+        juce::ColourGradient bgGradient = ColorPalette::createDepthGradient(bounds, ColorPalette::recessedPanel);
+        g.setGradientFill(bgGradient);
+        g.fillRect(bounds);
 
         // Get current BPM from playhead
         auto playHead = processor.getPlayHead();
@@ -132,79 +280,111 @@ public:
         auto* nanoBaseParam = processor.getParameters().getRawParameterValue("nanoBase");
         auto* nanoOctaveParam = processor.getParameters().getRawParameterValue("NanoOctave");
 
-        if (nanoTuneParam == nullptr || nanoBaseParam == nullptr || nanoOctaveParam == nullptr)
-        {
-            // Parameters not initialized yet - show placeholder
-            g.setColour(juce::Colours::grey);
-            g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
-            g.drawText("--", getLocalBounds(), juce::Justification::centred);
-            return;
-        }
+        juce::String displayText = "--";
+        juce::Colour textColor = ColorPalette::textInactive;
 
-        double currentNanoTune = nanoTuneParam->load();
-        int nanoBaseValue = static_cast<int>(nanoBaseParam->load());
-        NanoTuning::NanoBase nanoBase = static_cast<NanoTuning::NanoBase>(nanoBaseValue);
-        float nanoOctave = nanoOctaveParam->load();
-        float octaveMultiplier = std::pow(2.0f, nanoOctave);
-
-        float frequency;
-        bool isActive = processor.isUsingNanoRate();
-        float storedFrequency = processor.getNanoFrequency();
-
-        // Use stored frequency only if it's valid and we're in active mode
-        if (isActive && storedFrequency > 0.0f && std::isfinite(storedFrequency))
+        if (nanoTuneParam != nullptr && nanoBaseParam != nullptr && nanoOctaveParam != nullptr)
         {
-            // Use actual playing frequency
-            frequency = storedFrequency;
-            g.setColour(juce::Colours::lime);
-        }
-        else
-        {
-            // Calculate base frequency based on nanoBase setting
-            if (nanoBase == NanoTuning::NanoBase::BPMSynced)
+            double currentNanoTune = nanoTuneParam->load();
+            int nanoBaseValue = static_cast<int>(nanoBaseParam->load());
+            NanoTuning::NanoBase nanoBase = static_cast<NanoTuning::NanoBase>(nanoBaseValue);
+            float nanoOctave = nanoOctaveParam->load();
+            float octaveMultiplier = std::pow(2.0f, nanoOctave);
+
+            float frequency;
+            bool isActive = processor.isUsingNanoRate();
+            float storedFrequency = processor.getNanoFrequency();
+
+            // Use stored frequency only if it's valid and we're in active mode
+            if (isActive && storedFrequency > 0.0f && std::isfinite(storedFrequency))
             {
-                // BPM-synced: use beat-based calculation
-                double secondsPerCycle = ((60.0 / bpm) / 16.0) / currentNanoTune / octaveMultiplier;
-                frequency = static_cast<float>(1.0 / secondsPerCycle);
+                // Use actual playing frequency
+                frequency = storedFrequency;
+                textColor = ColorPalette::activeGreen; // Glowing green when active
             }
             else
             {
-                // Note-based: use musical note frequency
-                float noteFreq = NanoTuning::getNoteFrequency(nanoBase);
-                frequency = noteFreq * currentNanoTune * octaveMultiplier;
+                // Calculate base frequency based on nanoBase setting
+                if (nanoBase == NanoTuning::NanoBase::BPMSynced)
+                {
+                    // BPM-synced: use beat-based calculation
+                    double secondsPerCycle = ((60.0 / bpm) / 16.0) / currentNanoTune / octaveMultiplier;
+                    frequency = static_cast<float>(1.0 / secondsPerCycle);
+                }
+                else
+                {
+                    // Note-based: use musical note frequency
+                    float noteFreq = NanoTuning::getNoteFrequency(nanoBase);
+                    frequency = noteFreq * currentNanoTune * octaveMultiplier;
+                }
+
+                textColor = ColorPalette::textInactive; // Grey when calculated
             }
 
-            g.setColour(juce::Colours::grey);
+            // Validate frequency and create display text
+            if (std::isfinite(frequency) && frequency > 0.0f)
+            {
+                // Convert frequency to MIDI note and cents
+                float midiNote = 69.0f + 12.0f * std::log2(frequency / 440.0f);
+                int noteNumber = static_cast<int>(std::round(midiNote));
+                float cents = (midiNote - noteNumber) * 100.0f;
+
+                // Note names
+                const char* noteNames[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+                int noteIndex = ((noteNumber % 12) + 12) % 12;  // Ensure positive modulo
+                int octave = (noteNumber / 12) - 1;
+
+                // Format display string
+                displayText = juce::String(noteNames[noteIndex]) + juce::String(octave);
+                if (cents > 0.5f)
+                    displayText += " +" + juce::String(static_cast<int>(cents)) + "¢";
+                else if (cents < -0.5f)
+                    displayText += " " + juce::String(static_cast<int>(cents)) + "¢";
+            }
         }
 
-        // Validate frequency
-        if (!std::isfinite(frequency) || frequency <= 0.0f)
+        //==============================================================================
+        // TEXT - Glowing technical font
+        //==============================================================================
+        auto font = juce::Font(juce::FontOptions(16.0f));
+        font.setBold(true);
+        g.setFont(font);
+
+        // Draw glow behind text if active
+        if (textColor == ColorPalette::activeGreen)
         {
-            g.setColour(juce::Colours::grey);
-            g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
-            g.drawText("--", getLocalBounds(), juce::Justification::centred);
-            return;
+            // Multiple passes for glow effect
+            for (int i = 3; i > 0; --i)
+            {
+                float alpha = 0.15f * (4 - i) / 3.0f;
+                g.setColour(ColorPalette::activeGlow.withAlpha(alpha));
+                auto textBounds = bounds.expanded(i * 2.0f);
+                g.drawText(displayText, textBounds, juce::Justification::centred);
+            }
         }
 
-        // Convert frequency to MIDI note and cents
-        float midiNote = 69.0f + 12.0f * std::log2(frequency / 440.0f);
-        int noteNumber = static_cast<int>(std::round(midiNote));
-        float cents = (midiNote - noteNumber) * 100.0f;
+        // Draw main text
+        g.setColour(textColor);
+        g.drawText(displayText, bounds, juce::Justification::centred);
 
-        // Note names
-        const char* noteNames[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-        int noteIndex = ((noteNumber % 12) + 12) % 12;  // Ensure positive modulo
-        int octave = (noteNumber / 12) - 1;
+        //==============================================================================
+        // FRAME - Geometric border
+        //==============================================================================
+        auto framePath = TextureGenerator::createBeveledRectangle(bounds, 2.0f);
 
-        // Format display string
-        juce::String displayText = juce::String(noteNames[noteIndex]) + juce::String(octave);
-        if (cents > 0.5f)
-            displayText += " +" + juce::String(static_cast<int>(cents)) + "¢";
-        else if (cents < -0.5f)
-            displayText += " " + juce::String(static_cast<int>(cents)) + "¢";
-
-        g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
-        g.drawText(displayText, getLocalBounds(), juce::Justification::centred);
+        if (textColor == ColorPalette::activeGreen)
+        {
+            // Glowing green border when active
+            GlowEffect::drawStrokeWithGlow(g, framePath,
+                                            ColorPalette::activeGreen, 1.5f,
+                                            ColorPalette::activeGlow, 3.0f);
+        }
+        else
+        {
+            // Simple grey border when inactive
+            g.setColour(ColorPalette::frameGrey);
+            g.strokePath(framePath, juce::PathStrokeType(1.5f));
+        }
     }
 
 private:
@@ -234,6 +414,7 @@ public:
     DualSlider macroGateDualSlider, macroShapeDualSlider;
     juce::Slider macroSmoothSlider;
     juce::Slider timingOffsetSlider;
+    juce::Slider fadeLengthSlider;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateAttachment, nanoShapeAttachment, nanoSmoothAttachment, nanoEmaAttachment, nanoCycleCrossfadeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nanoGateRandomAttachment, nanoShapeRandomAttachment;
@@ -241,6 +422,7 @@ public:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateAttachment, macroShapeAttachment, macroSmoothAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> macroGateRandomAttachment, macroShapeRandomAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> timingOffsetAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeLengthAttachment;
 
     // Listeners for bipolar state synchronization
     std::unique_ptr<juce::ParameterAttachment> nanoGateBipolarAttachment;
@@ -295,7 +477,8 @@ public:
     juce::OwnedArray<juce::TextEditor> nanoSemitoneEditors;  // For Equal Temperament (0-11 semitones)
     juce::OwnedArray<juce::Label> nanoDecimalLabels;  // For Quarter-comma Meantone (read-only)
     juce::OwnedArray<juce::ComboBox> nanoVariantSelectors;  // For interval variants (e.g., Aug 4th vs Dim 5th)
-    juce::OwnedArray<juce::Label> nanoIntervalLabels;
+    juce::OwnedArray<RomanNumeralLabel> nanoIntervalLabels;  // Roman numeral SVG labels
+    std::array<std::unique_ptr<juce::Drawable>, 12> nanoLabelSVGs;  // Stored SVG drawables
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> nanoRatioAttachments;
 
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> nanoRateProbAttachments;
@@ -334,6 +517,14 @@ public:
     juce::ComboBox presetMenu;
     juce::Label presetNameLabel;
 
+    // Window type selection for nanoSmooth (advanced view only)
+    std::unique_ptr<juce::Label> windowTypeLabel;
+    juce::ComboBox windowTypeMenu;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> windowTypeAttachment;
+
+    // Fade length control (advanced view only)
+    juce::Label fadeLengthLabel;
+
     StutterVisualizer visualizer;
     NanoPitchTuner tuner;
 
@@ -357,6 +548,12 @@ private:
     // Stored bounds for drawing colored borders
     juce::Rectangle<int> rhythmicSlidersBounds;
     juce::Rectangle<int> nanoSlidersBounds;
+    juce::Rectangle<int> quantizationSlidersBounds;
+
+    // SVG panel backgrounds
+    std::unique_ptr<juce::Drawable> quantPanelSVG;
+    std::unique_ptr<juce::Drawable> rhythmicPanelSVG;
+    std::unique_ptr<juce::Drawable> nanoPanelSVG;
 
     // Layout helper methods
     void layoutEnvelopeControls(juce::Rectangle<int> bounds);
@@ -375,6 +572,9 @@ private:
     juce::TextButton randomizeNanoProbButton;
     juce::TextButton resetQuantProbButton;
     juce::TextButton randomizeQuantProbButton;
+
+    // Modern LookAndFeel for futuristic/technical UI styling
+    ModernLookAndFeel modernLookAndFeel;
 
     // This reference is provided as a quick way for your editor to
     // access the processor object that created it.

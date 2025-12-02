@@ -74,6 +74,7 @@ public:
 
     bool isUsingNanoRate() const { return currentlyUsingNanoRate.load(); }
     float getNanoFrequency() const { return currentNanoFrequency.load(); }
+    int getCurrentPlayingNanoRateIndex() const { return currentPlayingNanoRateIndex.load(); }
     bool isAutoStutterActive() const { return autoStutterActive; }
 
     // Preset management accessor
@@ -84,9 +85,6 @@ public:
 
 private:
     // ==== Timing Constants ====
-    static constexpr double FADE_DURATION_MS = 1.0;
-    static constexpr double FADE_DURATION_SECONDS = FADE_DURATION_MS / 1000.0;
-    static constexpr double PARAMETER_SAMPLE_ADVANCE_MS = 2.0;
     static constexpr double NANO_FADE_OUT_MS = 0.1;
     static constexpr double NANO_FADE_OUT_SECONDS = NANO_FADE_OUT_MS / 1000.0;
 
@@ -116,6 +114,21 @@ private:
         AfterMacroEnvelope       // Position C: After macro envelope (final wet signal)
     };
     static constexpr EmaPosition NANO_EMA_POSITION = EmaPosition::AfterNanoEnvelope;
+
+    // Window types for nanoSmooth per-cycle windowing
+    enum class WindowType {
+        None = 0,           // Bypass (no windowing)
+        Hann = 1,           // Default (current behavior) - FIXED
+        Hamming = 2,        // Similar to Hann, slightly different shape - FIXED
+        Blackman = 3,       // Wider main lobe, better side-lobe suppression - FIXED
+        BlackmanHarris = 4, // Even better side-lobe suppression - FIXED
+        Bartlett = 5,       // Triangular window - FIXED
+        Kaiser = 6,         // ADJUSTABLE (beta controlled by nanoSmooth)
+        Tukey = 7,          // ADJUSTABLE (alpha controlled by nanoSmooth)
+        Gaussian = 8,       // ADJUSTABLE (sigma controlled by nanoSmooth)
+        Planck = 9,         // ADJUSTABLE (epsilon controlled by nanoSmooth)
+        Exponential = 10    // ADJUSTABLE (tau controlled by nanoSmooth)
+    };
 
     // Cycle Crossfade Constants
     static constexpr float CYCLE_CROSSFADE_MAX_PERCENT = 0.1f;  // 10% max of loop length
@@ -197,6 +210,10 @@ private:
     float nextNanoEmaParam = 0.0f;            // EMA filter (formerly NanoSmooth)
     float nextNanoOctaveParam = 0.0f;
 
+    // Window type selection for nanoSmooth (sample-and-hold like other params)
+    int currentWindowType = 7;  // Default: Tukey
+    int nextWindowType = 7;
+
     // Held random offsets for nano parameters (calculated once per event, added to per-cycle values)
     float heldNanoGateRandomOffset = 0.0f;
     float heldNanoShapeRandomOffset = 0.0f;
@@ -237,9 +254,10 @@ private:
     // Manual timing offset for master track delay compensation
     std::atomic<float>* timingOffsetParam = nullptr;
 
-    // Nano rate tracking for tuner display
+    // Nano rate tracking for tuner display and UI state
     std::atomic<bool> currentlyUsingNanoRate {false};
     std::atomic<float> currentNanoFrequency {0.0f};
+    std::atomic<int> currentPlayingNanoRateIndex {-1};  // -1 = not playing, 0-11 = active nano rate index
 
     // Smoothed envelope parameters (0.3ms ramp time for fast response, prevents bleeding across events)
     juce::LinearSmoothedValue<float> smoothedNanoGate;
@@ -342,12 +360,209 @@ private:
         return juce::jmap(curveAmount, 0.0f, 1.0f, 1.0f, curvedGain);
     }
 
-    // Hann window calculation utility
-    // Produces a smooth S-curve from 0 → 1 → 0 across progress [0,1]
-    // Formula: 0.5 * (1 - cos(2π × progress))
-    static inline float calculateHannWindow(float progress)
+    // Multi-window calculation utility
+    // Produces window gain from 0 → 1 → 0 (or other shapes) across progress [0,1]
+    // windowType: current window selection
+    // progress: position within cycle [0.0, 1.0]
+    // intensity: nanoSmooth parameter value [0.0, 1.0]
+    static inline float calculateWindowGain(int windowType, float progress, float intensity)
     {
-        return 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi * progress));
+        // Guard: bypass if intensity too low or progress invalid
+        if (intensity < 0.01f || progress < 0.0f || progress > 1.0f) {
+            return 1.0f;  // No windowing
+        }
+
+        float windowGain = 1.0f;
+
+        switch (windowType) {
+            case 0: // None - bypass
+                windowGain = 1.0f;
+                break;
+
+            case 1: // Hann (default, maintains backward compatibility)
+                windowGain = 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi * progress));
+                break;
+
+            case 2: // Hamming
+                windowGain = 0.54f - 0.46f * std::cos(juce::MathConstants<float>::twoPi * progress);
+                break;
+
+            case 3: // Blackman
+            {
+                float a0 = 0.42f;
+                float a1 = 0.5f;
+                float a2 = 0.08f;
+                windowGain = a0
+                    - a1 * std::cos(juce::MathConstants<float>::twoPi * progress)
+                    + a2 * std::cos(2.0f * juce::MathConstants<float>::twoPi * progress);
+                break;
+            }
+
+            case 4: // Blackman-Harris
+            {
+                float a0 = 0.35875f;
+                float a1 = 0.48829f;
+                float a2 = 0.14128f;
+                float a3 = 0.01168f;
+                windowGain = a0
+                    - a1 * std::cos(juce::MathConstants<float>::twoPi * progress)
+                    + a2 * std::cos(2.0f * juce::MathConstants<float>::twoPi * progress)
+                    - a3 * std::cos(3.0f * juce::MathConstants<float>::twoPi * progress);
+                break;
+            }
+
+            case 5: // Bartlett (triangular)
+                windowGain = 1.0f - std::abs(2.0f * progress - 1.0f);
+                break;
+
+            case 6: // Kaiser (parameterized by intensity)
+            {
+                // Map intensity to beta: 0.0 → 0, 1.0 → 10
+                float beta = intensity * 10.0f;
+
+                // Kaiser window formula using modified Bessel function approximation
+                // w(n) = I0(beta * sqrt(1 - x^2)) / I0(beta), where x = 2*progress - 1
+                float x = 2.0f * progress - 1.0f;  // Map [0,1] → [-1,1]
+                float argument = beta * std::sqrt(std::max(0.0f, 1.0f - x * x));
+
+                // I0(z) approximation using polynomial (accurate for z < 3.75)
+                auto besselI0 = [](float z) -> float {
+                    if (z < 3.75f) {
+                        float t = z / 3.75f;
+                        float t2 = t * t;
+                        return 1.0f + 3.5156229f * t2 + 3.0899424f * t2 * t2
+                            + 1.2067492f * t2 * t2 * t2 + 0.2659732f * t2 * t2 * t2 * t2
+                            + 0.0360768f * t2 * t2 * t2 * t2 * t2 + 0.0045813f * t2 * t2 * t2 * t2 * t2 * t2;
+                    } else {
+                        float t = 3.75f / z;
+                        return (std::exp(z) / std::sqrt(z)) * (0.39894228f + 0.01328592f * t
+                            + 0.00225319f * t * t - 0.00157565f * t * t * t + 0.00916281f * t * t * t * t);
+                    }
+                };
+
+                float i0Beta = besselI0(beta);
+                windowGain = (i0Beta > 0.0001f) ? (besselI0(argument) / i0Beta) : 1.0f;
+                break;
+            }
+
+            case 7: // Tukey (parameterized by intensity)
+            {
+                // Map intensity to alpha: 0.0 → 0 (rectangular), 1.0 → 1 (full Hann)
+                float alpha = intensity;
+
+                if (alpha < 0.01f) {
+                    // Rectangular window (no taper)
+                    windowGain = 1.0f;
+                } else {
+                    // Taper width on each side
+                    float taperWidth = alpha * 0.5f;
+
+                    if (progress < taperWidth) {
+                        // Rising taper (cosine)
+                        float taperProgress = progress / taperWidth;
+                        windowGain = 0.5f * (1.0f - std::cos(juce::MathConstants<float>::pi * taperProgress));
+                    } else if (progress > (1.0f - taperWidth)) {
+                        // Falling taper (cosine)
+                        float taperProgress = (progress - (1.0f - taperWidth)) / taperWidth;
+                        windowGain = 0.5f * (1.0f + std::cos(juce::MathConstants<float>::pi * taperProgress));
+                    } else {
+                        // Flat-top region
+                        windowGain = 1.0f;
+                    }
+                }
+                break;
+            }
+
+            case 8: // Gaussian (parameterized by intensity)
+            {
+                // Map intensity to sigma: 0.0 → 0.2 (wide), 1.0 → 0.02 (narrow)
+                // Narrower Gaussian = more pronounced fade-in/out
+                float sigma = 0.2f - (intensity * 0.18f);
+                sigma = std::max(0.02f, sigma);  // Clamp minimum
+
+                // Gaussian formula: exp(-0.5 * ((x - 0.5) / sigma)^2)
+                float x = progress - 0.5f;  // Center at 0.5
+                float exponent = -0.5f * (x * x) / (sigma * sigma);
+                windowGain = std::exp(exponent);
+                break;
+            }
+
+            case 9: // Planck-taper (parameterized by intensity)
+            {
+                // Map intensity to epsilon: 0.0 → 0.05 (minimal taper), 1.0 → 0.5 (maximum taper)
+                float epsilon = 0.05f + (intensity * 0.45f);
+                epsilon = juce::jlimit(0.001f, 0.5f, epsilon);
+
+                // Planck-taper window formula (correct implementation)
+                // w(x) = 1 for epsilon < x < 1-epsilon (flat top)
+                // w(x) = [1 + exp(epsilon/x + epsilon/(x-epsilon))]^-1 for 0 <= x <= epsilon (left taper)
+                // w(x) = [1 + exp(epsilon/(1-x) + epsilon/(1-x-epsilon))]^-1 for 1-epsilon <= x <= 1 (right taper)
+
+                if (progress >= epsilon && progress <= (1.0f - epsilon)) {
+                    // Flat-top region
+                    windowGain = 1.0f;
+                } else if (progress < epsilon) {
+                    // Left taper - smooth transition from 0 to 1
+                    if (progress > 0.0001f && progress < epsilon - 0.0001f) {
+                        // Standard Planck formula for left edge
+                        float z = (epsilon / progress) + (epsilon / (progress - epsilon));
+                        windowGain = 1.0f / (1.0f + std::exp(z));
+                    } else if (progress <= 0.0001f) {
+                        windowGain = 0.0f;
+                    } else {
+                        windowGain = 1.0f;  // At boundary
+                    }
+                } else {
+                    // Right taper (progress > 1-epsilon) - smooth transition from 1 to 0
+                    float distFromEnd = 1.0f - progress;
+                    if (distFromEnd > 0.0001f && distFromEnd < epsilon - 0.0001f) {
+                        // Standard Planck formula for right edge
+                        float z = (epsilon / distFromEnd) + (epsilon / (distFromEnd - epsilon));
+                        windowGain = 1.0f / (1.0f + std::exp(z));
+                    } else if (distFromEnd <= 0.0001f) {
+                        windowGain = 0.0f;
+                    } else {
+                        windowGain = 1.0f;  // At boundary
+                    }
+                }
+                break;
+            }
+
+            case 10: // Exponential/Poisson (parameterized by intensity)
+            {
+                // Map intensity to alpha (decay rate): 0.0 → 0.5 (wide/slow decay), 1.0 → 8.0 (narrow/fast decay)
+                float alpha = 0.5f + (intensity * 7.5f);
+
+                // Exponential window formula (correct normalized version)
+                // w(progress) = exp(-2 * alpha * |progress - 0.5|) where progress ∈ [0, 1]
+                // At center (progress = 0.5): windowGain = 1.0
+                // At edges (progress = 0 or 1): windowGain = exp(-alpha)
+                float distanceFromCenter = std::abs(progress - 0.5f);
+                windowGain = std::exp(-2.0f * alpha * distanceFromCenter);
+                break;
+            }
+
+            default:
+                windowGain = 1.0f;
+                break;
+        }
+
+        return windowGain;
+    }
+
+    // Returns true if window type has adjustable parameters controlled by nanoSmooth
+    static inline bool isAdjustableWindow(int windowType)
+    {
+        switch (windowType) {
+            case 6:  // Kaiser
+            case 7:  // Tukey
+            case 8:  // Gaussian
+            case 9:  // Planck
+            case 10: // Exponential
+                return true;
+            default:
+                return false;
+        }
     }
 
     // JUCE DSP ProcessorChain for waveshaping
