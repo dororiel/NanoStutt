@@ -256,9 +256,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         parametersHeld = false;
         wasPlaying = false;
         writePos = 0;
+        heldNanoGateRandomOffset = 0.0f;
+        heldNanoShapeRandomOffset = 0.0f;
+        heldNanoEmaRandomOffset = 0.0f;
+        heldCycleCrossfadeRandomOffset = 0.0f;
         currentlyUsingNanoRate.store(false);
         currentNanoFrequency.store(0.0f);
         currentPlayingNanoRateIndex.store(-1);
+        currentPlayingRegularRateIndex.store(-1);
         return;
     }
 
@@ -276,6 +281,12 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             // Reset EMA filter state to prevent clicks with nano smooth
             std::fill(nanoEmaState.begin(), nanoEmaState.end(), 0.0f);
             std::fill(dryEmaStateForFade.begin(), dryEmaStateForFade.end(), 0.0f);
+
+            // Reset held random offsets
+            heldNanoGateRandomOffset = 0.0f;
+            heldNanoShapeRandomOffset = 0.0f;
+            heldNanoEmaRandomOffset = 0.0f;
+            heldCycleCrossfadeRandomOffset = 0.0f;
 
             // Reset stop fade state
             isFadingToStopTransport = false;
@@ -518,9 +529,14 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 autoStutterActive = false;
                 parametersHeld = false;
                 writePos = 0;
+                heldNanoGateRandomOffset = 0.0f;
+                heldNanoShapeRandomOffset = 0.0f;
+                heldNanoEmaRandomOffset = 0.0f;
+                heldCycleCrossfadeRandomOffset = 0.0f;
                 currentlyUsingNanoRate.store(false);
                 currentNanoFrequency.store(0.0f);
                 currentPlayingNanoRateIndex.store(-1);
+                currentPlayingRegularRateIndex.store(-1);
             }
 
             // Skip remaining processing for this sample
@@ -553,10 +569,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             autoStutterActive = false;
             parametersHeld = false; // Reset for next event
 
+            // Reset held random offsets
+            heldNanoGateRandomOffset = 0.0f;
+            heldNanoShapeRandomOffset = 0.0f;
+            heldNanoEmaRandomOffset = 0.0f;
+            heldCycleCrossfadeRandomOffset = 0.0f;
+
             // Reset nano rate tracking
             currentlyUsingNanoRate.store(false);
             currentNanoFrequency.store(0.0f);
             currentPlayingNanoRateIndex.store(-1);
+            currentPlayingRegularRateIndex.store(-1);
 
             // Add post-stutter silence if macro gate < 1.0
             // Use CURRENT parameters (the event that just ended)
@@ -660,13 +683,15 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                         currentlyUsingNanoRate.store(true);
                         currentNanoFrequency.store(static_cast<float>(1.0 / sliceDuration));
                         currentPlayingNanoRateIndex.store(selectedIndex);  // Store which nano rate is playing
+                        currentPlayingRegularRateIndex.store(-1);  // No regular rate playing when nano is active
                     } else {
                         chosenDenominator = regularDenominators[selectedIndex];
 
-                        // Not using nano rate
+                        // Using regular rate - track for UI glow effects
                         currentlyUsingNanoRate.store(false);
                         currentNanoFrequency.store(0.0f);
                         currentPlayingNanoRateIndex.store(-1);  // No nano rate playing
+                        currentPlayingRegularRateIndex.store(selectedIndex);  // Store which regular rate is playing (0-12)
                     }
                     
                     autoStutterRemainingSamples = stutterEventLengthSamples;
@@ -703,6 +728,13 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     currentNanoEmaParam = nextNanoEmaParam;            // EMA filter
                     currentNanoOctaveParam = nextNanoOctaveParam;
 
+                    // Apply held random offsets to current values for first cycle
+                    // (Per-cycle resampling will handle subsequent cycles at loop wraparound)
+                    currentNanoEmaParam = juce::jlimit(0.0f, 1.0f, currentNanoEmaParam + heldNanoEmaRandomOffset);
+
+                    // Calculate EMA alpha coefficient from randomized EMA parameter
+                    currentNanoEmaAlpha = 1.0f - (currentNanoEmaParam * NANO_EMA_ALPHA_RANGE);
+
                     // Note: heldNanoGateRandomOffset and heldNanoShapeRandomOffset were already set at Decision Point 2
                     // These offsets will be added to per-cycle base values throughout the event
 
@@ -710,7 +742,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                     // Pre-calculate nano envelope length for first cycle
                     float nanoGateMultiplier = NANO_GATE_MIN + currentNanoGateParam * NANO_GATE_RANGE;
-                    int loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate + 1), 1, maxStutterLenSamples);
+                    int loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate), 1, maxStutterLenSamples);
                     heldNanoEnvelopeLengthInSamples = std::max(1, static_cast<int>((float)loopLen * nanoGateMultiplier));
 
                     // Transfer EMA state from crossfade to wet processing for seamless continuation
@@ -740,7 +772,17 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // Note: shouldResetEmaState remains false, allowing smooth continuation
 
                 }
-                else autoStutterActive = false;
+                else {
+                    autoStutterActive = false;
+                    // Reset held random offsets
+                    heldNanoGateRandomOffset = 0.0f;
+                    heldNanoShapeRandomOffset = 0.0f;
+                    heldNanoEmaRandomOffset = 0.0f;
+                    heldCycleCrossfadeRandomOffset = 0.0f;
+                    // Reset rate indices when no stutter is active - clears playing glow
+                    currentPlayingNanoRateIndex.store(-1);
+                    currentPlayingRegularRateIndex.store(-1);
+                }
                 
                 // SCHEDULE NEXT STUTTER EVENT
                 float randomValue = juce::Random::getSystemRandom().nextFloat();
@@ -894,6 +936,44 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                         nanoOctaveRandomOffset = static_cast<float>(-juce::Random::getSystemRandom().nextInt(maxOffset + 1));
                 }
 
+                // Sample NanoEmaFilter random offset
+                float nanoEmaRandom = parameters.getRawParameterValue("NanoEmaFilterRandom")->load();
+                bool nanoEmaBipolar = parameters.getRawParameterValue("NanoEmaFilterRandomBipolar")->load() > 0.5f;
+                float nanoEmaRandomOffset;
+
+                if (nanoEmaBipolar)
+                {
+                    // Bipolar: ±random (symmetric around center)
+                    nanoEmaRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(nanoEmaRandom);
+                }
+                else
+                {
+                    // Unipolar: + or - random (based on sign)
+                    if (nanoEmaRandom > 0.0f)
+                        nanoEmaRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoEmaRandom;
+                    else
+                        nanoEmaRandomOffset = juce::Random::getSystemRandom().nextFloat() * nanoEmaRandom;
+                }
+
+                // Sample CycleCrossfade random offset
+                float cycleCrossfadeRandom = parameters.getRawParameterValue("CycleCrossfadeRandom")->load();
+                bool cycleCrossfadeBipolar = parameters.getRawParameterValue("CycleCrossfadeRandomBipolar")->load() > 0.5f;
+                float cycleCrossfadeRandomOffset;
+
+                if (cycleCrossfadeBipolar)
+                {
+                    // Bipolar: ±random (symmetric around center)
+                    cycleCrossfadeRandomOffset = (juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f) * std::abs(cycleCrossfadeRandom);
+                }
+                else
+                {
+                    // Unipolar: + or - random (based on sign)
+                    if (cycleCrossfadeRandom > 0.0f)
+                        cycleCrossfadeRandomOffset = juce::Random::getSystemRandom().nextFloat() * cycleCrossfadeRandom;
+                    else
+                        cycleCrossfadeRandomOffset = juce::Random::getSystemRandom().nextFloat() * cycleCrossfadeRandom;
+                }
+
                 // Apply offsets to base values for next event parameters (used in fade calculations)
                 float nanoGateBase = params.getRawParameterValue("NanoGate")->load();
                 float nanoShapeBase = params.getRawParameterValue("NanoShape")->load();
@@ -916,6 +996,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Store the random offsets for use throughout the event (will be copied to held offsets at event start)
                 heldNanoGateRandomOffset = nanoGateRandomOffset;
                 heldNanoShapeRandomOffset = nanoShapeRandomOffset;
+                heldNanoEmaRandomOffset = nanoEmaRandomOffset;
+                heldCycleCrossfadeRandomOffset = cycleCrossfadeRandomOffset;
 
                 parametersHeld = true;
                 parametersSampledForUpcomingEvent = true; // Prevent re-sampling for same event
@@ -1258,7 +1340,7 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         if (autoStutterActive)
         {
             // Calculate stutter loop parameters
-            loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate + 1), 1, maxStutterLenSamples);
+            loopLen = std::clamp(static_cast<int>((secondsPerWholeNote / chosenDenominator) * sampleRate), 1, maxStutterLenSamples);
 
             // Handle reverse playback logic
             loopPos = stutterPlayCounter % (loopLen);
@@ -1293,8 +1375,9 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // This prevents mismatches when nano smooth is automated during a cycle
                 // (currentNanoSmoothParam set at line 683, swapped from nextNanoSmoothParam)
 
-                // NanoEmaFilter: Resample (no randomization)
-                currentNanoEmaParam = smoothedNanoEma.getCurrentValue();
+                // NanoEmaFilter: Resample base value and add held random offset
+                float nanoEmaBase = smoothedNanoEma.getCurrentValue();
+                currentNanoEmaParam = juce::jlimit(0.0f, 1.0f, nanoEmaBase + heldNanoEmaRandomOffset);
 
                 // Calculate EMA alpha coefficient from EMA filter parameter
                 // 0.0 = bypass (alpha=1.0), 1.0 = max smooth (alpha=0.05)
@@ -1303,7 +1386,8 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Set flag to reset EMA state at next sample (loop wraparound)
                 // Skip reset if cycle crossfade is active (EMA continues smoothly through crossfade)
                 // EXCEPT in reverse mode where envelope direction reverses (always reset to prevent discontinuity)
-                float cycleCrossfade = parameters.getRawParameterValue("CycleCrossfade")->load();
+                float cycleCrossfadeBase = parameters.getRawParameterValue("CycleCrossfade")->load();
+                float cycleCrossfade = juce::jlimit(0.01f, 1.0f, cycleCrossfadeBase + heldCycleCrossfadeRandomOffset);
                 if (cycleCrossfade < 0.01f || (currentStutterIsReversed && firstRepeatCyclePlayed)) {
                     shouldResetEmaState = true;
                 }
@@ -1452,11 +1536,12 @@ void NanoStuttAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
                 // Apply cycle boundary crossfade to smooth loop transitions
                 // ENVELOPE-AWARE: Calculate envelope gains for both samples before mixing
-                float cycleCrossfade = parameters.getRawParameterValue("CycleCrossfade")->load();
+                float cycleCrossfadeBase2 = parameters.getRawParameterValue("CycleCrossfade")->load();
+                float cycleCrossfade = juce::jlimit(0.01f, 1.0f, cycleCrossfadeBase2 + heldCycleCrossfadeRandomOffset);
                 bool crossfadeWasApplied = false;  // Track if we applied envelope-aware crossfade
                 if (cycleCrossfade > 0.0f && autoStutterActive) {
-                    int crossfadeLen = static_cast<int>(cycleCrossfade * loopLen * CYCLE_CROSSFADE_MAX_PERCENT);
-                    crossfadeLen = std::clamp(crossfadeLen, 0, loopLen / 2);  // Max 50% of loop
+                    int crossfadeLen = std::max(1, static_cast<int>(cycleCrossfade * loopLen * CYCLE_CROSSFADE_MAX_PERCENT));
+                    crossfadeLen = std::clamp(crossfadeLen, 1, std::max(1, loopLen / 2));  // Min 1 sample, Max 50% of loop
 
                     if (crossfadeLen > 0) {
                         // Handle forward playback (only for truly forward events, not first cycle of reverse)
@@ -1960,7 +2045,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         juce::StringArray { "1/4", "1/8", "1/16", "1/32" }, 1));
 
     // Quant unit probability parameters
-    auto quantLabels = juce::StringArray { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
+    auto quantLabels = juce::StringArray { "4", "2", "1", "1/2", "1/4", "1/8d", "1/8", "1/16", "1/32" };
     for (int i = 0; i < quantLabels.size(); ++i)
     {
         juce::String id = "quantProb_" + quantLabels[i];
@@ -1968,7 +2053,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1), id, 0.0f, 1.0f, defaultValue));
     }
 
-    auto rateLabels = juce::StringArray { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    auto rateLabels = juce::StringArray { "1", "1/2d", "1/2", "1/4d", "1/3", "1/4", "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
     for (const auto& label : rateLabels)
     {
         juce::String id = "rateProb_" + label;
@@ -2004,7 +2089,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1), id, 0.1f, 4.0f, defaultRatio));
     }
 
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGate", 1), "Nano Gate", 0.0f, 1.0f, 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGate", 1), "Nano Gate", 0.25f, 1.0f, 1.0f));  // Range: 0.25 to 1.0 (matches MacroGate and CLAUDE.md)
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShape", 1), "Nano Shape", 0.0f, 1.0f, 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoSmooth", 1), "Nano Smooth", 0.0f, 1.0f, 0.0f));  // Window smoothing intensity
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
@@ -2016,7 +2101,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         juce::AudioParameterChoiceAttributes().withLabel("Window")
     ));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoEmaFilter", 1), "EMA Filter", 0.0f, 1.0f, 0.0f));  // EMA damping filter
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("CycleCrossfade", 1), "Cycle Crossfade", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("CycleCrossfade", 1), "Cycle Crossfade", 0.01f, 1.0f, 0.02f));  // Min: 0.01 (subtle fade to prevent clicks), Default: 0.02
+
+    // Damping randomization parameters
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("NanoEmaFilterRandom", 1), "Nano EMA Random",
+        -1.0f, 1.0f, 0.0f));  // Bipolar randomization for EMA filter
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("NanoEmaFilterRandomBipolar", 1), "Nano EMA Random Bipolar",
+        false));  // Default to unipolar mode
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("CycleCrossfadeRandom", 1), "Cycle Crossfade Random",
+        -1.0f, 1.0f, 0.0f));  // Bipolar randomization for crossfade
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("CycleCrossfadeRandomBipolar", 1), "Cycle Crossfade Random Bipolar",
+        false));  // Default to unipolar mode
+
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoGateRandom", 1), "Nano Gate Random", -1.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("NanoShapeRandom", 1), "Nano Shape Random", -1.0f, 1.0f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID("NanoGateRandomBipolar", 1), "Nano Gate Random Bipolar", false));
@@ -2074,10 +2174,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
         juce::ParameterID("GainCompensation", 1), "Gain Compensation", false));
 
     // Visibility/Active state parameters for repeat rates
-    // Defaults: 1/6 through 1/32 active (indices 5-11)
+    // Defaults: 1/8d through 1/32 active (indices 6-12)
     for (int i = 0; i < rateLabels.size(); ++i)
     {
-        bool defaultActive = (i >= 5); // Indices 5-11: "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32"
+        bool defaultActive = (i >= 6); // Indices 6-12: "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32"
         juce::String id = "rateActive_" + rateLabels[i];
         params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(id, 1), id, defaultActive));
     }
@@ -2096,7 +2196,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
     // Defaults: 1/2 through 1/16 active (indices 3-7)
     for (int i = 0; i < quantLabels.size(); ++i)
     {
-        bool defaultActive = (i >= 3 && i <= 7); // Indices 3-7: "1/2", "1/4", "d1/8", "1/8", "1/16"
+        bool defaultActive = (i >= 3 && i <= 7); // Indices 3-7: "1/2", "1/4", "1/8d", "1/8", "1/16"
         juce::String id = "quantActive_" + quantLabels[i];
         params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(id, 1), id, defaultActive));
     }
@@ -2106,8 +2206,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoStuttAudioProcessor::cre
 
 void NanoStuttAudioProcessor::updateCachedParameters()
 {
-    static const std::array<std::string, 12> regularLabels = { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
-    static const std::array<std::string, 9> quantLabels = { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
+    static const std::array<std::string, 13> regularLabels = { "1", "1/2d", "1/2", "1/4d", "1/3", "1/4", "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    static const std::array<std::string, 9> quantLabels = { "4", "2", "1", "1/2", "1/4", "1/8d", "1/8", "1/16", "1/32" };
 
     // Update regular rate weights, respecting active state
     for (size_t i = 0; i < regularLabels.size(); ++i)
@@ -2289,8 +2389,8 @@ void NanoStuttAudioProcessor::detectCustomScale()
 
 void NanoStuttAudioProcessor::initializeParameterListeners()
 {
-    static const std::array<std::string, 12> regularLabels = { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
-    static const std::array<std::string, 9> quantLabels = { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
+    static const std::array<std::string, 13> regularLabels = { "1", "1/2d", "1/2", "1/4d", "1/3", "1/4", "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    static const std::array<std::string, 9> quantLabels = { "4", "2", "1", "1/2", "1/4", "1/8d", "1/8", "1/16", "1/32" };
 
     for (const auto& label : regularLabels)
         parameters.addParameterListener("rateProb_" + label, this);

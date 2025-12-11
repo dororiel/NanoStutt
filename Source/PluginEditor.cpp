@@ -47,6 +47,9 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     // Apply modern LookAndFeel for futuristic/technical UI styling
     setLookAndFeel(&modernLookAndFeel);
 
+    // Pre-generate neumorphic background texture (once, no paint() allocation)
+    backgroundTexture = TextureGenerator::createNeumorphicNoise(800, 600, 0.03f);
+
     // === Manual Stutter Button === //
     addAndMakeVisible(stutterButton);
     stutterButton.setButtonText("Stutter");
@@ -97,6 +100,11 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     // Setup DualSliders for NanoGate and NanoShape with randomization
     addAndMakeVisible(nanoGateDualSlider);
     nanoGateDualSlider.setDefaultValues(1.0, 0.0);  // NanoGate default: 1.0, Random default: 0.0
+    nanoGateDualSlider.setScaleMarkings(4, {".25", ".5", ".75", "1"});  // Scale: 0.25 to 1.0
+    // Vertical gradient: exact panel background colors (orange top → purple bottom)
+    auto panelOrange = ColorPalette::rhythmicOrange;
+    auto panelPurple = ColorPalette::nanoPurple;
+    nanoGateDualSlider.setSectionGradient(panelOrange, panelPurple);
     nanoGateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.getParameters(), "NanoGate", nanoGateDualSlider.getMainSlider());
     nanoGateRandomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -144,6 +152,9 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     // Setup DualSlider for NanoShape with randomization
     addAndMakeVisible(nanoShapeDualSlider);
     nanoShapeDualSlider.setDefaultValues(0.5, 0.0);  // NanoShape default: 0.5, Random default: 0.0
+    nanoShapeDualSlider.setScaleMarkings(5, {"0", ".25", ".5", ".75", "1"});  // Scale: 0.0 to 1.0
+    // Vertical gradient: exact panel background colors (reuse panel colors)
+    nanoShapeDualSlider.setSectionGradient(panelOrange, panelPurple);
     nanoShapeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.getParameters(), "NanoShape", nanoShapeDualSlider.getMainSlider());
     nanoShapeRandomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -170,6 +181,9 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     // Setup DualSlider for NanoOctave with randomization and integer snapping
     addAndMakeVisible(nanoOctaveDualSlider);
     nanoOctaveDualSlider.setDefaultValues(0.0, 0.0);  // NanoOctave default: 0, Random default: 0
+    nanoOctaveDualSlider.setScaleMarkings(5, {"-1", "0", "1", "2", "3"});  // Scale: -1 to 3 octaves
+    // Pure purple for nano-specific pitch control
+    nanoOctaveDualSlider.setSectionColor(ColorPalette::nanoPurple);
 
     // Set integer snapping for both main and random sliders
     nanoOctaveDualSlider.getMainSlider().setRange(-1.0, 3.0, 1.0);  // Step of 1.0 for integers
@@ -215,12 +229,59 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
 
     // NanoSmooth - Hann window smoothing (regular slider, no randomization)
     setupKnob(nanoSmoothSlider, "NanoSmooth", nanoSmoothAttachment);
+    // Convert to horizontal slider
+    nanoSmoothSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    nanoSmoothSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
 
-    // NanoEma - EMA filter (regular slider, no randomization)
-    setupKnob(nanoEmaSlider, "NanoEmaFilter", nanoEmaAttachment);
+    // NanoEma DualSlider - EMA filter with randomization
+    addAndMakeVisible(nanoEmaDualSlider);
+    nanoEmaDualSlider.setDefaultValues(0.0, 0.0);  // EMA default: 0.0, Random default: 0.0
+    nanoEmaDualSlider.setScaleMarkings(5, {"0", ".25", ".5", ".75", "1"});  // Scale: 0.0 to 1.0
+    // Vertical gradient: exact panel background colors (reuse panel colors)
+    nanoEmaDualSlider.setSectionGradient(panelOrange, panelPurple);
+    nanoEmaAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "NanoEmaFilter", nanoEmaDualSlider.getMainSlider());
+    nanoEmaRandomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "NanoEmaFilterRandom", nanoEmaDualSlider.getRandomSlider());
 
-    // CycleCrossfade (regular slider for cycle boundary smoothing)
-    setupKnob(nanoCycleCrossfadeSlider, "CycleCrossfade", nanoCycleCrossfadeAttachment);
+    // Setup bipolar state synchronization for NanoEma
+    nanoEmaBipolarAttachment = std::make_unique<juce::ParameterAttachment>(
+        *audioProcessor.getParameters().getParameter("NanoEmaFilterRandomBipolar"),
+        [this](float newValue) {
+            nanoEmaDualSlider.setBipolarMode(newValue > 0.5f);
+        });
+    nanoEmaDualSlider.setBipolarMode(
+        audioProcessor.getParameters().getRawParameterValue("NanoEmaFilterRandomBipolar")->load() > 0.5f);
+    nanoEmaDualSlider.onBipolarModeChange = [this](bool isBipolar) {
+        auto* param = audioProcessor.getParameters().getParameter("NanoEmaFilterRandomBipolar");
+        if (param)
+            param->setValueNotifyingHost(isBipolar ? 1.0f : 0.0f);
+    };
+
+    // CycleCrossfade DualSlider - cycle boundary smoothing with randomization
+    addAndMakeVisible(nanoCycleCrossfadeDualSlider);
+    nanoCycleCrossfadeDualSlider.setDefaultValues(0.02, 0.0);  // Default: 0.02 (subtle fade), Random: 0.0
+    nanoCycleCrossfadeDualSlider.setScaleMarkings(5, {"0", ".25", ".5", ".75", "1"});  // Scale: 0.0 to 1.0
+    // Vertical gradient: exact panel background colors (reuse panel colors)
+    nanoCycleCrossfadeDualSlider.setSectionGradient(panelOrange, panelPurple);
+    nanoCycleCrossfadeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "CycleCrossfade", nanoCycleCrossfadeDualSlider.getMainSlider());
+    nanoCycleCrossfadeRandomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.getParameters(), "CycleCrossfadeRandom", nanoCycleCrossfadeDualSlider.getRandomSlider());
+
+    // Setup bipolar state synchronization for CycleCrossfade
+    nanoCycleCrossfadeBipolarAttachment = std::make_unique<juce::ParameterAttachment>(
+        *audioProcessor.getParameters().getParameter("CycleCrossfadeRandomBipolar"),
+        [this](float newValue) {
+            nanoCycleCrossfadeDualSlider.setBipolarMode(newValue > 0.5f);
+        });
+    nanoCycleCrossfadeDualSlider.setBipolarMode(
+        audioProcessor.getParameters().getRawParameterValue("CycleCrossfadeRandomBipolar")->load() > 0.5f);
+    nanoCycleCrossfadeDualSlider.onBipolarModeChange = [this](bool isBipolar) {
+        auto* param = audioProcessor.getParameters().getParameter("CycleCrossfadeRandomBipolar");
+        if (param)
+            param->setValueNotifyingHost(isBipolar ? 1.0f : 0.0f);
+    };
 
     // Fade Length slider (advanced view only - horizontal style like right section)
     addAndMakeVisible(fadeLengthSlider);
@@ -233,6 +294,8 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     // Setup DualSliders for MacroGate and MacroShape with randomization
     addAndMakeVisible(macroGateDualSlider);
     macroGateDualSlider.setDefaultValues(1.0, 0.0);  // MacroGate default: 1.0, Random default: 0.0
+    macroGateDualSlider.setScaleMarkings(4, {".25", ".5", ".75", "1"});  // Scale: 0.25 to 1.0
+    macroGateDualSlider.setSectionColor(ColorPalette::accentCyan);  // Green for macro section
     macroGateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.getParameters(), "MacroGate", macroGateDualSlider.getMainSlider());
     macroGateRandomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -240,6 +303,8 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
 
     addAndMakeVisible(macroShapeDualSlider);
     macroShapeDualSlider.setDefaultValues(0.5, 0.0);  // MacroShape default: 0.5, Random default: 0.0
+    macroShapeDualSlider.setScaleMarkings(5, {"0", ".25", ".5", ".75", "1"});  // Scale: 0.0 to 1.0
+    macroShapeDualSlider.setSectionColor(ColorPalette::accentCyan);  // Green for macro section
     macroShapeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.getParameters(), "MacroShape", macroShapeDualSlider.getMainSlider());
     macroShapeRandomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -303,6 +368,9 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     };
 
     setupKnob(macroSmoothSlider, "MacroSmooth", macroSmoothAttachment);
+    // Convert to horizontal slider
+    macroSmoothSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    macroSmoothSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
 
     // === Timing Offset Slider ===
     addAndMakeVisible(timingOffsetSlider);
@@ -324,8 +392,8 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     setupLabel(nanoShapeLabel, "Shape", nanoShapeDualSlider);
     setupLabel(nanoOctaveLabel, "Oct", nanoOctaveDualSlider);
     setupLabel(nanoSmoothLabel, "Smooth", nanoSmoothSlider);
-    setupLabel(nanoEmaLabel, "EMA", nanoEmaSlider);
-    setupLabel(nanoCycleCrossfadeLabel, "Xfade", nanoCycleCrossfadeSlider);
+    setupLabel(nanoEmaLabel, "EMA", nanoEmaDualSlider);
+    setupLabel(nanoCycleCrossfadeLabel, "Xfade", nanoCycleCrossfadeDualSlider);
     setupLabel(macroGateLabel, "Gate", macroGateDualSlider);
     setupLabel(macroShapeLabel, "Shape", macroShapeDualSlider);
     setupLabel(macroSmoothLabel, "Smooth", macroSmoothSlider);
@@ -358,8 +426,8 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     quantizationLabel.setColour(juce::Label::textColourId, ColorPalette::accentCyan);
     addAndMakeVisible(quantizationLabel);
     
-    // === Rate Sliders and buttons ===
-    auto rateLabels = juce::StringArray { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    // === Rate Sliders and buttons (13 rates - added 1/4d) ===
+    auto rateLabels = juce::StringArray { "1", "1/2d", "1/2", "1/4d", "1/3", "1/4", "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
     for (int i = 0; i < rateLabels.size(); ++i)
     {
         auto* slider = new juce::Slider();
@@ -369,11 +437,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         addAndMakeVisible(slider);
         rateProbSliders.add(slider);
 
-        auto* label = new juce::Label();
-        label->setText(rateLabels[i], juce::dontSendNotification);
-        label->setJustificationType(juce::Justification::centred);
-        addAndMakeVisible(label);
-        rateProbLabels.add(label);
+        // Note: Labels are created later after SVG loading (see after line 850)
 
         juce::String paramId = "rateProb_" + rateLabels[i];
         rateProbAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -392,8 +456,8 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
             audioProcessor.getParameters(), activeParamId, *toggleButton));
     }
     
-    // === Quant Probability Sliders ===
-    auto quantLabels = juce::StringArray { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
+    // === Quant Probability Sliders (updated naming) ===
+    auto quantLabels = juce::StringArray { "4", "2", "1", "1/2", "1/4", "1/8d", "1/8", "1/16", "1/32" };
     for (int i = 0; i < quantLabels.size(); ++i)
     {
         auto* slider = new juce::Slider();
@@ -403,11 +467,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
         addAndMakeVisible(slider);
         quantProbSliders.add(slider);
 
-        auto* label = new juce::Label();
-        label->setText(quantLabels[i], juce::dontSendNotification);
-        label->setJustificationType(juce::Justification::centred);
-        addAndMakeVisible(label);
-        quantProbLabels.add(label);
+        // Note: Labels are created later after SVG loading (see after line 850)
 
         juce::String paramId = "quantProb_" + quantLabels[i];
         quantProbAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -599,7 +659,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
             setSize(currentWidth, 690);  // Increased to prevent nano preset cutoff
         } else {
             // Exiting advanced view: restore original height
-            setSize(currentWidth, 570);  // Increased for better spacing
+            setSize(currentWidth, 610);  // Increased to accommodate taller label rows (27px vs 12-15px)
         }
 
         resized();
@@ -761,6 +821,128 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
             tintDrawable(nanoLabelSVGs[i].get(), ColorPalette::nanoPurple.brighter(2.0f));
     }
 
+    // === Load Repeat Rate SVG Graphics ===
+    const char* repeatRateSVGData[13] = {
+        BinaryData::_1_svg,       // Index 0: "1" (whole note)
+        BinaryData::_1_2d_svg,    // Index 1: "1/2d" (dotted half)
+        BinaryData::_1_2_svg,     // Index 2: "1/2" (half note)
+        BinaryData::_1_4d_svg,    // Index 3: "1/4d" (dotted quarter) - NEW
+        BinaryData::_1_3_svg,     // Index 4: "1/3" (triplet)
+        BinaryData::_1_4_svg,     // Index 5: "1/4" (quarter note)
+        BinaryData::_1_8d_svg,    // Index 6: "1/8d" (dotted eighth)
+        BinaryData::_1_6_svg,     // Index 7: "1/6" (triplet)
+        BinaryData::_1_8_svg,     // Index 8: "1/8" (eighth note)
+        BinaryData::_1_12_svg,    // Index 9: "1/12" (triplet)
+        BinaryData::_1_16_svg,    // Index 10: "1/16" (sixteenth)
+        BinaryData::_1_24_svg,    // Index 11: "1/24" (triplet)
+        BinaryData::_1_32_svg     // Index 12: "1/32" (thirty-second)
+    };
+
+    juce::StringArray repeatRateSVGNames = { "1", "1/2d", "1/2", "1/4d", "1/3", "1/4", "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+
+    for (int i = 0; i < 13; ++i)
+    {
+        repeatRateSVGs[i] = loadSVGFromBinary(repeatRateSVGData[i], repeatRateSVGNames[i]);
+
+        // Tint SVG to brightened orange (rhythmic section color)
+        if (repeatRateSVGs[i] != nullptr)
+            tintDrawable(repeatRateSVGs[i].get(), ColorPalette::rhythmicOrange.brighter(2.0f));
+    }
+
+    // === Load Quant Rate SVG Graphics ===
+    const char* quantRateSVGData[9] = {
+        BinaryData::_4_svg,       // Index 0: "4" (4 bars)
+        BinaryData::_2_svg,       // Index 1: "2" (2 bars)
+        BinaryData::_1_svg,       // Index 2: "1" (1 bar)
+        BinaryData::_1_2_svg,     // Index 3: "1/2" (half note)
+        BinaryData::_1_4_svg,     // Index 4: "1/4" (quarter note)
+        BinaryData::_1_8d_svg,    // Index 5: "1/8d" (dotted eighth)
+        BinaryData::_1_8_svg,     // Index 6: "1/8" (eighth note)
+        BinaryData::_1_16_svg,    // Index 7: "1/16" (sixteenth)
+        BinaryData::_1_32_svg     // Index 8: "1/32" (thirty-second)
+    };
+
+    juce::StringArray quantRateSVGNames = { "4", "2", "1", "1/2", "1/4", "1/8d", "1/8", "1/16", "1/32" };
+
+    for (int i = 0; i < 9; ++i)
+    {
+        quantRateSVGs[i] = loadSVGFromBinary(quantRateSVGData[i], quantRateSVGNames[i]);
+
+        // Tint SVG to brightened cyan (quant section color)
+        if (quantRateSVGs[i] != nullptr)
+            tintDrawable(quantRateSVGs[i].get(), ColorPalette::accentCyan.brighter(2.0f));
+    }
+
+    // Helper function to determine vertical scale factor based on label complexity
+    auto getScaleFactorForLabel = [](const juce::String& label) -> float {
+        int charCount = label.length();
+
+        // Simple labels (1-2 characters: "1", "2", "4")
+        if (charCount <= 2) {
+            return 1.0f;  // Full height
+        }
+        // Fraction labels (3 characters: "1/2", "1/3", "1/4", "1/6", "1/8")
+        else if (charCount == 3) {
+            return 0.75f;  // 75% height to compensate for wider aspect ratio
+        }
+        // Complex labels (4+ characters: "1/2d", "1/4d", "1/8d", "1/12", "1/16", "1/24", "1/32")
+        else {
+            return 0.70f;  // 70% height for extra wide labels
+        }
+    };
+
+    // === Create Repeat Rate Labels (now that SVGs are loaded) ===
+    auto rateLabelsForCreation = juce::StringArray { "1", "1/2d", "1/2", "1/4d", "1/3", "1/4", "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    for (int i = 0; i < rateLabelsForCreation.size(); ++i)
+    {
+        auto* label = new RomanNumeralLabel();
+
+        // Clone tinted SVG for this label
+        if (repeatRateSVGs[i] != nullptr)
+        {
+            auto svgCopy = repeatRateSVGs[i]->createCopy();
+            label->setSVGDrawable(std::move(svgCopy));
+        }
+
+        // Orange border matching rhythmic section
+        label->setBorderColour(ColorPalette::rhythmicOrange);
+
+        // Opaque background to block panel SVG bleed-through
+        label->setBackgroundFillColour(ColorPalette::mainBackground);
+
+        // Apply scale factor based on label complexity to compensate for SVG aspect ratio differences
+        label->setVerticalScaleFactor(getScaleFactorForLabel(rateLabelsForCreation[i]));
+
+        addAndMakeVisible(label);
+        rateProbLabels.add(label);
+    }
+
+    // === Create Quant Rate Labels (now that SVGs are loaded) ===
+    auto quantLabelsForCreation = juce::StringArray { "4", "2", "1", "1/2", "1/4", "1/8d", "1/8", "1/16", "1/32" };
+    for (int i = 0; i < quantLabelsForCreation.size(); ++i)
+    {
+        auto* label = new RomanNumeralLabel();
+
+        // Clone tinted SVG for this label
+        if (quantRateSVGs[i] != nullptr)
+        {
+            auto svgCopy = quantRateSVGs[i]->createCopy();
+            label->setSVGDrawable(std::move(svgCopy));
+        }
+
+        // Cyan border matching quant section
+        label->setBorderColour(ColorPalette::accentCyan);
+
+        // Opaque background to block panel SVG bleed-through
+        label->setBackgroundFillColour(ColorPalette::mainBackground);
+
+        // Apply scale factor based on label complexity to compensate for SVG aspect ratio differences
+        label->setVerticalScaleFactor(getScaleFactorForLabel(quantLabelsForCreation[i]));
+
+        addAndMakeVisible(label);
+        quantProbLabels.add(label);
+    }
+
     // === Nano Interval Labels (Roman Numeral SVGs) ===
     // Array indicating which indices are capitals (ending in M) vs lowercase
     // Indices: 0=IM, 1=ii, 2=IIM, 3=iii, 4=IIIM, 5=IVM, 6=iv, 7=VM, 8=vi, 9=VIM, 10=vii, 11=VIIM
@@ -831,7 +1013,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     randomizeRateProbButton.setButtonText("Random");
     randomizeRateProbButton.onClick = [this, rateLabels]() {
         // Pick random number of sliders (3-5)
-        int numToRandomize = juce::Random::getSystemRandom().nextInt(juce::Range<int>(3, 6)); // 3, 4, or 5
+        int numToRandomize = juce::Random::getSystemRandom().nextInt(juce::Range<int>(2, 6)); // 3, 4, or 5
 
         // Create shuffled indices
         std::vector<int> indices;
@@ -856,7 +1038,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     randomizeNanoProbButton.setButtonText("Random");
     randomizeNanoProbButton.onClick = [this]() {
         // Pick random number of sliders (3-5)
-        int numToRandomize = juce::Random::getSystemRandom().nextInt(juce::Range<int>(3, 6));
+        int numToRandomize = juce::Random::getSystemRandom().nextInt(juce::Range<int>(3, 8));
 
         // Create shuffled indices
         std::vector<int> indices;
@@ -881,7 +1063,7 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     randomizeQuantProbButton.setButtonText("Random");
     randomizeQuantProbButton.onClick = [this, quantLabels]() {
         // Pick random number of sliders (3-5)
-        int numToRandomize = juce::Random::getSystemRandom().nextInt(juce::Range<int>(3, 6));
+        int numToRandomize = juce::Random::getSystemRandom().nextInt(juce::Range<int>(3, 8));
 
         // Create shuffled indices
         std::vector<int> indices;
@@ -906,8 +1088,8 @@ NanoStuttAudioProcessorEditor::NanoStuttAudioProcessorEditor (NanoStuttAudioProc
     addAndMakeVisible(visualizer);
     addAndMakeVisible(tuner);
 
-    setResizeLimits(1000, 570, 1000, 690);
-    setSize(1000, 570);
+    setResizeLimits(1000, 610, 1000, 690);
+    setSize(1000, 610);
     setResizable(false, false);
 
     // Load SVG panel backgrounds from embedded BinaryData
@@ -933,6 +1115,9 @@ void NanoStuttAudioProcessorEditor::paint (juce::Graphics& g)
 {
     // Fill with modern dark background
     g.fillAll (ColorPalette::mainBackground);
+
+    // Draw subtle neumorphic noise texture
+    g.drawImageAt(backgroundTexture, 0, 0);
 
     // Draw colored backgrounds and borders around slider sections with modern styling
     // Cyan section for quantization sliders
@@ -1078,8 +1263,8 @@ void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> 
     // Add Window Type and Fade Length rows in advanced view
     if (showAdvancedView) {
         envelopeGrid.templateRows = {
-            Track(Px(20)), Track(Px(58)), Track(Px(58)), // Macro: label, knobs
-            Track(Px(20)), Track(Px(58)), Track(Px(58)), // Nano: label, knobs
+            Track(Px(20)), Track(Px(80)), Track(Px(40)), // Macro: label, knobs (larger), smooth (smaller)
+            Track(Px(20)), Track(Px(80)), Track(Px(40)), // Nano: label, knobs (larger), smooth (smaller)
             Track(Px(20)), Track(Px(58)),                 // Damping: label, knobs
             Track(Px(20)), Track(Px(30)),                 // Window Type: label, menu (advanced only)
             Track(Px(10)),                                // Spacer row (advanced only)
@@ -1087,8 +1272,8 @@ void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> 
         };
     } else {
         envelopeGrid.templateRows = {
-            Track(Px(20)), Track(Px(58)), Track(Px(58)), // Macro: label, knobs
-            Track(Px(20)), Track(Px(58)), Track(Px(58)), // Nano: label, knobs
+            Track(Px(20)), Track(Px(80)), Track(Px(40)), // Macro: label, knobs (larger), smooth (smaller)
+            Track(Px(20)), Track(Px(80)), Track(Px(40)), // Nano: label, knobs (larger), smooth (smaller)
             Track(Px(20)), Track(Px(58))  // Damping: label, knobs
         };
     }
@@ -1116,8 +1301,8 @@ void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> 
             GridItem(nanoSmoothSlider).withArea(6, 1, 6, 3),
             // Damping section
             GridItem(dampingLabel).withArea(7, 1, 7, 3),
-            GridItem(nanoEmaSlider).withArea(8, 1),
-            GridItem(nanoCycleCrossfadeSlider).withArea(8, 2),
+            GridItem(nanoEmaDualSlider).withArea(8, 1),
+            GridItem(nanoCycleCrossfadeDualSlider).withArea(8, 2),
             // Window Type section (advanced view only)
             GridItem(*windowTypeLabel).withArea(9, 1, 9, 3),
             GridItem(windowTypeMenu).withArea(10, 1, 10, 3),
@@ -1144,8 +1329,8 @@ void NanoStuttAudioProcessorEditor::layoutEnvelopeControls(juce::Rectangle<int> 
             GridItem(nanoSmoothSlider).withArea(6, 1, 6, 3),
             // Damping section
             GridItem(dampingLabel).withArea(7, 1, 7, 3),
-            GridItem(nanoEmaSlider).withArea(8, 1),
-            GridItem(nanoCycleCrossfadeSlider).withArea(8, 2)
+            GridItem(nanoEmaDualSlider).withArea(8, 1),
+            GridItem(nanoCycleCrossfadeDualSlider).withArea(8, 2)
         };
     }
 
@@ -1163,15 +1348,15 @@ void NanoStuttAudioProcessorEditor::layoutRateSliders(juce::Rectangle<int> bound
     Grid rhythmicGrid;
     // Grid rows depend on view mode
     if (showAdvancedView) {
-        // Advanced: toggles (20) + sliders (90) + labels (15)
-        rhythmicGrid.templateRows = { Track(Px(20)), Track(Px(90)), Track(Px(15)) };
+        // Advanced: toggles (20) + sliders (90) + labels (27)
+        rhythmicGrid.templateRows = { Track(Px(20)), Track(Px(90)), Track(Px(27)) };
     } else {
-        // Simple: sliders (90) + labels (15)
-        rhythmicGrid.templateRows = { Track(Px(90)), Track(Px(15)) };
+        // Simple: sliders (90) + labels (27)
+        rhythmicGrid.templateRows = { Track(Px(90)), Track(Px(27)) };
     }
 
     // Determine which sliders are active
-    auto rateLabels = juce::StringArray { "1bar", "3/4", "1/2", "1/3", "1/4", "1/6", "d1/8", "1/8", "1/12", "1/16", "1/24", "1/32" };
+    auto rateLabels = juce::StringArray { "1", "1/2d", "1/2", "1/4d", "1/3", "1/4", "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
     std::vector<bool> activeStates;
     for (int i = 0; i < rateProbSliders.size(); ++i)
     {
@@ -1194,8 +1379,8 @@ void NanoStuttAudioProcessorEditor::layoutRateSliders(juce::Rectangle<int> bound
             if (activeStates[i])
                 rhythmicGrid.templateColumns.add(Track(Fr(1)));
     }
-    rhythmicGrid.columnGap = Px(4);
-    rhythmicGrid.rowGap = Px(4);  // Add spacing between rows
+    rhythmicGrid.columnGap = Px(3);
+    rhythmicGrid.rowGap = Px(0);  // No gap - labels directly under sliders
 
     // Add grid items
     rhythmicGrid.items.clear();
@@ -1213,16 +1398,24 @@ void NanoStuttAudioProcessorEditor::layoutRateSliders(juce::Rectangle<int> bound
             {
                 rateProbSliders[i]->setAlpha(0.4f);
                 rateProbSliders[i]->setEnabled(false);
+                // Label alpha removed - glow provides visual feedback
             }
             else
             {
                 rateProbSliders[i]->setAlpha(1.0f);
                 rateProbSliders[i]->setEnabled(true);
+                // Label alpha removed - glow provides visual feedback
             }
 
             rhythmicGrid.items.add(GridItem(*rateActiveButtons[i]).withArea(1, columnIndex));
             rhythmicGrid.items.add(GridItem(*rateProbSliders[i]).withArea(2, columnIndex));
-            rhythmicGrid.items.add(GridItem(*rateProbLabels[i]).withArea(3, columnIndex));
+            rhythmicGrid.items.add(GridItem(*rateProbLabels[i])
+                .withArea(3, columnIndex)
+                .withWidth(40.0f)
+                .withHeight(27.0f)
+                .withMargin({-5, 0, 0, 0})
+                .withAlignSelf(GridItem::AlignSelf::center)
+                .withJustifySelf(GridItem::JustifySelf::center));
             columnIndex++;
         }
         else if (activeStates[i])
@@ -1236,7 +1429,13 @@ void NanoStuttAudioProcessorEditor::layoutRateSliders(juce::Rectangle<int> bound
 
             // No toggle row in simple view - sliders start at row 1
             rhythmicGrid.items.add(GridItem(*rateProbSliders[i]).withArea(1, columnIndex));
-            rhythmicGrid.items.add(GridItem(*rateProbLabels[i]).withArea(2, columnIndex));
+            rhythmicGrid.items.add(GridItem(*rateProbLabels[i])
+                .withArea(2, columnIndex)
+                .withWidth(40.0f)
+                .withHeight(27.0f)
+                .withMargin({-5, 0, 0, 0})
+                .withAlignSelf(GridItem::AlignSelf::center)
+                .withJustifySelf(GridItem::JustifySelf::center));
             columnIndex++;
         }
         else
@@ -1429,15 +1628,15 @@ void NanoStuttAudioProcessorEditor::layoutQuantizationControls(juce::Rectangle<i
     Grid quantGrid;
     // Grid rows depend on view mode
     if (showAdvancedView) {
-        // Advanced: toggles (20) + sliders (90) + labels (12)
-        quantGrid.templateRows = { Track(Px(20)), Track(Px(90)), Track(Px(12)) };
+        // Advanced: toggles (20) + sliders (90) + labels (27)
+        quantGrid.templateRows = { Track(Px(20)), Track(Px(90)), Track(Px(27)) };
     } else {
-        // Simple: sliders (90) + labels (12) - NO toggles
-        quantGrid.templateRows = { Track(Px(90)), Track(Px(12)) };
+        // Simple: sliders (90) + labels (27) - NO toggles
+        quantGrid.templateRows = { Track(Px(90)), Track(Px(27)) };
     }
 
     // Determine which sliders are active
-    auto quantLabels = juce::StringArray { "4bar", "2bar", "1bar", "1/2", "1/4", "d1/8", "1/8", "1/16", "1/32" };
+    auto quantLabels = juce::StringArray { "4", "2", "1", "1/2", "1/4", "1/8d", "1/8", "1/16", "1/32" };
     std::vector<bool> activeStates;
     for (int i = 0; i < quantProbSliders.size(); ++i)
     {
@@ -1460,8 +1659,8 @@ void NanoStuttAudioProcessorEditor::layoutQuantizationControls(juce::Rectangle<i
             if (activeStates[i])
                 quantGrid.templateColumns.add(Track(Fr(1)));
     }
-    quantGrid.columnGap = Px(6);
-    quantGrid.rowGap = Px(4);  // Add spacing between rows
+    quantGrid.columnGap = Px(3);
+    quantGrid.rowGap = Px(0);  // No gap - labels directly under sliders
 
     // Add grid items
     quantGrid.items.clear();
@@ -1479,16 +1678,24 @@ void NanoStuttAudioProcessorEditor::layoutQuantizationControls(juce::Rectangle<i
             {
                 quantProbSliders[i]->setAlpha(0.4f);
                 quantProbSliders[i]->setEnabled(false);
+                // Label alpha removed - glow provides visual feedback
             }
             else
             {
                 quantProbSliders[i]->setAlpha(1.0f);
                 quantProbSliders[i]->setEnabled(true);
+                // Label alpha removed - glow provides visual feedback
             }
 
             quantGrid.items.add(GridItem(*quantActiveButtons[i]).withArea(1, columnIndex));
             quantGrid.items.add(GridItem(*quantProbSliders[i]).withArea(2, columnIndex));
-            quantGrid.items.add(GridItem(*quantProbLabels[i]).withArea(3, columnIndex));
+            quantGrid.items.add(GridItem(*quantProbLabels[i])
+                .withArea(3, columnIndex)
+                .withWidth(40.0f)
+                .withHeight(27.0f)
+                .withMargin({-5, 0, 0, 0})
+                .withAlignSelf(GridItem::AlignSelf::center)
+                .withJustifySelf(GridItem::JustifySelf::center));
             columnIndex++;
         }
         else if (activeStates[i])
@@ -1502,7 +1709,13 @@ void NanoStuttAudioProcessorEditor::layoutQuantizationControls(juce::Rectangle<i
 
             // No toggle row in simple view - sliders start at row 1
             quantGrid.items.add(GridItem(*quantProbSliders[i]).withArea(1, columnIndex));
-            quantGrid.items.add(GridItem(*quantProbLabels[i]).withArea(2, columnIndex));
+            quantGrid.items.add(GridItem(*quantProbLabels[i])
+                .withArea(2, columnIndex)
+                .withWidth(40.0f)
+                .withHeight(27.0f)
+                .withMargin({-5, 0, 0, 0})
+                .withAlignSelf(GridItem::AlignSelf::center)
+                .withJustifySelf(GridItem::JustifySelf::center));
             columnIndex++;
         }
         else
@@ -1682,8 +1895,8 @@ void NanoStuttAudioProcessorEditor::resized()
 
     currentY += sectionLabelHeight + sectionLabelGap;
 
-    // Quant height depends on view mode (includes rowGap spacing: 4px between rows)
-    int quantTotalHeight = showAdvancedView ? (20 + uniformSliderHeight + 12 + 8) : (uniformSliderHeight + 12 + 4);
+    // Quant height depends on view mode (rowGap is 0)
+    int quantTotalHeight = showAdvancedView ? (20 + uniformSliderHeight + 27) : (uniformSliderHeight + 27);
     auto quantBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(quantTotalHeight);
 
     // Border includes toggles (advanced only), sliders, and labels (section label outside)
@@ -1706,8 +1919,8 @@ void NanoStuttAudioProcessorEditor::resized()
 
     currentY += sectionLabelHeight + sectionLabelGap;
 
-    // Grid layout height depends on view mode (includes rowGap spacing: 4px between rows)
-    int rhythmicTotalHeight = showAdvancedView ? (20 + uniformSliderHeight + 15 + 8) : (uniformSliderHeight + 15 + 4);
+    // Grid layout height depends on view mode (rowGap is 0)
+    int rhythmicTotalHeight = showAdvancedView ? (20 + uniformSliderHeight + 27) : (uniformSliderHeight + 27);
     auto rhythmicBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(rhythmicTotalHeight);
 
     // Border includes toggles (advanced only), sliders, and labels (section label outside)
@@ -1728,14 +1941,14 @@ void NanoStuttAudioProcessorEditor::resized()
     nanoRatesLabel.setBounds(nanoRatesLabelBounds);
     currentY += sectionLabelHeight + sectionLabelGap;
 
-    // Nano bounds height depends on advanced view state (includes rowGap spacing: 4px between rows)
+    // Nano bounds height depends on advanced view state (rowGap is 0)
     int nanoTotalHeight;
     if (showAdvancedView) {
-        // Advanced: toggles (20) + numerators (20) + denominators (20) + sliders (90) + labels (15) + gaps (4×4=16)
-        nanoTotalHeight = 20 + 20 + 20 + uniformSliderHeight + 15 + 16;
+        // Advanced: toggles (20) + numerators (20) + denominators (20) + sliders (90) + labels (27)
+        nanoTotalHeight = 20 + 20 + 20 + uniformSliderHeight + 27;
     } else {
-        // Simple: sliders (90) + labels (15) + gaps (4)
-        nanoTotalHeight = uniformSliderHeight + 15 + 4;
+        // Simple: sliders (90) + labels (27)
+        nanoTotalHeight = uniformSliderHeight + 27;
     }
 
     auto nanoBounds = centerBounds.withY(centerBounds.getY() + currentY).withHeight(nanoTotalHeight);
@@ -2329,5 +2542,71 @@ void NanoStuttAudioProcessorEditor::timerCallback()
         // else: 0.0f (no glow for disabled rates)
 
         nanoIntervalLabels[i]->setGlowIntensity(glowIntensity);
+    }
+
+    // Update repeat rate label glow effects and colors based on active/playing state
+    int currentPlayingRegularIndex = audioProcessor.getCurrentPlayingRegularRateIndex();
+
+    // Rate labels: "1", "1/2d", "1/2", "1/4d", "1/3", "1/4", "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32"
+    auto rateLabels = juce::StringArray { "1", "1/2d", "1/2", "1/4d", "1/3", "1/4", "1/8d", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32" };
+
+    for (int i = 0; i < rateProbLabels.size(); ++i)
+    {
+        // Check if this rate is enabled
+        bool isEnabled = audioProcessor.getParameters()
+            .getRawParameterValue("rateActive_" + rateLabels[i])->load() > 0.5f;
+
+        // Check if this is the currently playing rate
+        bool isPlaying = (currentPlayingRegularIndex == i);
+
+        // Set border color based on enabled state
+        if (isEnabled) {
+            rateProbLabels[i]->setBorderColour(ColorPalette::rhythmicOrange);
+        } else {
+            rateProbLabels[i]->setBorderColour(ColorPalette::rhythmicOrange.darker(0.6f));
+        }
+
+        // Set glow intensity: playing=1.0, enabled=0.3, disabled=0.0
+        float glowIntensity = 0.0f;
+        if (isPlaying) {
+            glowIntensity = 1.0f;
+        } else if (isEnabled) {
+            glowIntensity = 0.3f;
+        }
+
+        rateProbLabels[i]->setGlowIntensity(glowIntensity);
+    }
+
+    // Update quantization label glow effects
+    int currentActiveQuantIndex = audioProcessor.getCurrentQuantIndex();
+
+    // Quant labels: "4", "2", "1", "1/2", "1/4", "1/8d", "1/8", "1/16", "1/32"
+    auto quantLabels = juce::StringArray { "4", "2", "1", "1/2", "1/4", "1/8d", "1/8", "1/16", "1/32" };
+
+    for (int i = 0; i < quantProbLabels.size(); ++i)
+    {
+        // Check if this quant unit is enabled
+        bool isEnabled = audioProcessor.getParameters()
+            .getRawParameterValue("quantActive_" + quantLabels[i])->load() > 0.5f;
+
+        // Check if this is the currently active quantization unit
+        bool isActive = (currentActiveQuantIndex == i);
+
+        // Set border color based on enabled state
+        if (isEnabled) {
+            quantProbLabels[i]->setBorderColour(ColorPalette::accentCyan);
+        } else {
+            quantProbLabels[i]->setBorderColour(ColorPalette::accentCyan.darker(0.6f));
+        }
+
+        // Set glow intensity: active=1.0, enabled=0.3, disabled=0.0
+        float glowIntensity = 0.0f;
+        if (isActive) {
+            glowIntensity = 1.0f;
+        } else if (isEnabled) {
+            glowIntensity = 0.3f;
+        }
+
+        quantProbLabels[i]->setGlowIntensity(glowIntensity);
     }
 }

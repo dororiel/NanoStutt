@@ -75,6 +75,8 @@ public:
     bool isUsingNanoRate() const { return currentlyUsingNanoRate.load(); }
     float getNanoFrequency() const { return currentNanoFrequency.load(); }
     int getCurrentPlayingNanoRateIndex() const { return currentPlayingNanoRateIndex.load(); }
+    int getCurrentPlayingRegularRateIndex() const { return currentPlayingRegularRateIndex.load(); }
+    int getCurrentQuantIndex() const { return currentQuantIndex; }
     bool isAutoStutterActive() const { return autoStutterActive; }
 
     // Preset management accessor
@@ -85,7 +87,7 @@ public:
 
 private:
     // ==== Timing Constants ====
-    static constexpr double NANO_FADE_OUT_MS = 0.1;
+    static constexpr double NANO_FADE_OUT_MS = 0.5;
     static constexpr double NANO_FADE_OUT_SECONDS = NANO_FADE_OUT_MS / 1000.0;
 
     // Quantization Constants
@@ -106,6 +108,10 @@ private:
     // EMA Filter Constants
     static constexpr float NANO_EMA_MIN_ALPHA = 0.05f;  // Maximum smoothing (at knob=1.0)
     static constexpr float NANO_EMA_ALPHA_RANGE = 0.95f; // Range: 0.05-1.0
+
+    // EMA Gain Compensation (4 dB at maximum smoothing to compensate for volume loss)
+    static constexpr float NANO_EMA_MAX_GAIN_COMPENSATION_DB = 4.0f;
+    static constexpr float NANO_EMA_MAX_GAIN_COMPENSATION_LINEAR = 1.5849f;  // 10^(4/20)
 
     // EMA Signal Chain Position (for testing - change to test different positions)
     enum class EmaPosition {
@@ -184,7 +190,7 @@ private:
     int macroEnvelopeLengthInSamples = 0;
     
     // Cached parameters for real-time-safe access
-    std::array<float, 12> regularRateWeights {{ 0.0f }};
+    std::array<float, 13> regularRateWeights {{ 0.0f }};  // Was 12, now 13 (added 1/4d)
     std::array<float, 12> nanoRateWeights {{ 0.0f }};
     std::array<float, 9> quantUnitWeights {{ 0.0f }};
     float nanoBlend = 0.0f;
@@ -217,6 +223,8 @@ private:
     // Held random offsets for nano parameters (calculated once per event, added to per-cycle values)
     float heldNanoGateRandomOffset = 0.0f;
     float heldNanoShapeRandomOffset = 0.0f;
+    float heldNanoEmaRandomOffset = 0.0f;           // Held for entire stutter event
+    float heldCycleCrossfadeRandomOffset = 0.0f;    // Held for entire stutter event
 
     bool parametersHeld = false;
     
@@ -258,6 +266,7 @@ private:
     std::atomic<bool> currentlyUsingNanoRate {false};
     std::atomic<float> currentNanoFrequency {0.0f};
     std::atomic<int> currentPlayingNanoRateIndex {-1};  // -1 = not playing, 0-11 = active nano rate index
+    std::atomic<int> currentPlayingRegularRateIndex {-1};  // -1 = not playing, 0-12 = active regular rate index
 
     // Smoothed envelope parameters (0.3ms ramp time for fast response, prevents bleeding across events)
     juce::LinearSmoothedValue<float> smoothedNanoGate;
@@ -288,8 +297,9 @@ private:
     float currentNanoEmaAlpha = 1.0f;           // Current alpha coefficient (1.0 = bypass, 0.05 = max smooth)
     bool shouldResetEmaState = false;           // Flag to reset EMA at loop wraparound
 
-    // Ratio/denominator lookup
-    static constexpr std::array<double, 12> regularDenominators {{ 1.0, 4.0/3.0, 2.0, 3.0, 4.0, 6.0, 16.0/3.0, 8.0, 12.0, 16.0, 24.0, 32.0 }};
+    // Ratio/denominator lookup (updated for 13 rates with new order including 1/4d)
+    // Order: 1, 1/2d, 1/2, 1/4d, 1/3, 1/4, 1/8d, 1/6, 1/8, 1/12, 1/16, 1/24, 1/32
+    static constexpr std::array<double, 13> regularDenominators {{ 1.0, 4.0/3.0, 2.0, 8.0/3.0, 3.0, 4.0, 16.0/3.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0 }};
     static constexpr std::array<float, 12> nanoRatios {{
         1.0f,           // C - Unison
         1.059463094f,   // C# - Minor 2nd

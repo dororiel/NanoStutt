@@ -86,12 +86,16 @@ NanoStutt is a sophisticated stutter/glitch audio plugin built with JUCE that pr
   - Fixed windows blend from no smoothing to full window; adjustable windows use intensity to control window shape
 
 #### Damping Section
-- **EMA Filter**: Exponential moving average low-pass filter (0.0-1.0) - alpha coefficient mapping (0.0 = bypass, 1.0 = maximum smoothing)
+- **EMA Filter**: Exponential moving average low-pass filter (0.0-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
+  - Alpha coefficient mapping (0.0 = bypass, 1.0 = maximum smoothing)
   - Per-channel state tracking with intelligent reset logic for reverse mode
   - Applied after nano envelope in signal chain
-- **Cycle Crossfade**: Envelope-aware crossfading at nano cycle boundaries (0.0-1.0)
+  - Randomization held constant per event, applied to per-cycle base values
+- **Cycle Crossfade**: Envelope-aware crossfading at nano cycle boundaries (0.01-1.0) with Serum-style randomization (±1.0 bipolar or directional unipolar)
   - Smooths loop transitions with automatic envelope gain tracking
   - Applied before Hann windowing for click-free operation
+  - Minimum 1-sample crossfade enforced for all loop lengths
+  - Randomization held constant per event, applied to per-cycle base values
 
 ### Mix Modes
 - **Gate Mode**: Traditional gated stutter with silence gaps
@@ -211,6 +215,32 @@ make -j4
 - Manual stutter buttons may need GUI integration
 
 ### Recent Improvements
+- **Implemented EMA and Cycle Crossfade Randomization** - Serum-style outer ring randomization now fully functional
+  - Added `heldNanoEmaRandomOffset` and `heldCycleCrossfadeRandomOffset` variables
+  - Random offsets sampled once at Decision Point 2 (before event starts), held constant throughout event
+  - Applied at per-cycle resampling AND at event start (first cycle fix)
+  - Base parameter values resampled every cycle, random offset added on top (enables automation)
+  - Supports bipolar (±) and unipolar (+/-) modes via right-click toggle
+  - Reset logic in all state change locations (transport stop/jump, event end, etc.)
+  - Values clamped to valid ranges (EMA: 0.0-1.0, Xfade: 0.01-1.0)
+- **Fixed Gradient Colors for Nano Controls** - gradient now uses actual panel background colors
+  - Changed from `.brighter(2.0f)` (label colors) to base `ColorPalette::rhythmicOrange` and `ColorPalette::nanoPurple`
+  - Applied to all four nano section DualSliders (Gate, Shape, EMA, Cycle Crossfade)
+  - Gradient now matches exact panel background tinting for visual consistency
+- **Fixed First Cycle Randomization Bug** - randomization now affects all cycles including first
+  - Applied EMA random offset immediately at Decision Point 1 (event start)
+  - Calculate EMA alpha coefficient from randomized value for first cycle
+  - Previously randomization only affected 2nd cycle onwards due to per-cycle resampling timing
+- **Fixed Minimum Crossfade Bypass** - crossfade now works even at minimum parameter value
+  - Changed clamp lower bound from 0 to 1 to preserve minimum crossfade length
+  - Upper bound also enforced with `std::max(1, loopLen / 2)` to prevent zero-length crossfades
+  - Guarantees at least 1 sample of crossfade for all loop lengths, including very fast nano rates
+- **Fixed Loop Length Off-by-One Error** - loops now perfectly aligned to time divisions
+  - Removed `+ 1` sample offset from both loop length calculations (lines 745, 1343)
+  - Loop lengths now match exact time division at current BPM with no timing drift
+  - Critical for musical timing accuracy and DAW grid alignment
+  - Especially noticeable improvement on fast nano rates where +1 sample was 10-20% of loop length
+
 - **User-Controllable Fade Length and Dynamic Parameter Sampling** - replaced hardcoded fade timing with adjustable parameter
   - Added FadeLength parameter (0.0001ms to 30ms, default: 1.0ms) with logarithmic scale
   - Removed hardcoded FADE_DURATION_MS and PARAMETER_SAMPLE_ADVANCE_MS constants
